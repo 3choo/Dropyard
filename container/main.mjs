@@ -21,6 +21,10 @@ const PORT = 8080;
 const MB = 1024 * 1024;
 const MULTIPART_THRESHOLD = 32 * MB;
 const MULTIPART_PART = 8 * MB;
+// Extract→upload in bounded batches so disk peak stays at
+// (volume set + one batch), not (volume set + everything the archive holds).
+const BATCH_FILES = 256;
+const BATCH_BYTES = 512 * MB;
 
 const MIME = {
   html: 'text/html; charset=utf-8',
@@ -152,6 +156,29 @@ async function* walkFiles(dir) {
   }
 }
 
+/** Parse `7zz l -slt -ba` output into {path, size} entries, directories dropped. */
+function parseListing(stdout) {
+  const entries = [];
+  let cur = null;
+  const flush = () => {
+    if (cur && cur.path) entries.push(cur);
+    cur = null;
+  };
+  for (const raw of stdout.split('\n')) {
+    const line = raw.replace(/\r$/, '');
+    if (line.startsWith('Path = ')) {
+      flush();
+      cur = { path: line.slice(7), size: 0 };
+    } else if (cur) {
+      if (line.startsWith('Size = ')) cur.size = Number(line.slice(7)) || 0;
+      else if (line.startsWith('Folder = +')) cur = null; // directory entry
+      else if (line === '') flush();
+    }
+  }
+  flush();
+  return entries;
+}
+
 async function runJob(payload) {
   const { jobId, volumes, prefix, caps, r2 } = payload;
   const work = join(tmpdir(), `gitctx-${jobId}`);
@@ -175,37 +202,79 @@ async function runJob(payload) {
     }
 
     const firstRar = volumes.find((v) => v.path.toLowerCase().endsWith('.rar')) ?? volumes[0];
-    let tail = '';
-    try {
-      const { stderr } = await execFileAsync('7zz', ['x', '-y', `-o${out}`, join(vols, firstRar.path.split('/').pop())], {
-        maxBuffer: 16 * MB,
-      });
-      tail = stderr.split('\n').filter(Boolean).slice(-8).join('\n');
-    } catch (err) {
-      const message = (err.stderr || err.message || '7zz failed').split('\n').filter(Boolean).slice(-8).join('\n');
-      throw new Error(`7zz could not extract this archive: ${message.slice(0, 600)}`);
+    const archive = join(vols, firstRar.path.split('/').pop());
+
+    // List before extracting anything: enforce the caps up front and plan
+    // batches, so an oversized archive fails fast instead of filling the disk.
+    const { stdout: listing } = await execFileAsync('7zz', ['l', '-slt', '-ba', archive], {
+      maxBuffer: 256 * MB,
+    });
+    const entries = parseListing(listing);
+    if (entries.length > caps.files) {
+      throw new Error(`Archive contains ${entries.length} files, over the ${caps.files} file unpack limit`);
+    }
+    let totalBytes = 0;
+    for (const e of entries) {
+      if (e.size > caps.fileBytes) {
+        throw new Error(`File ${e.path} exceeds the per-file unpack limit`);
+      }
+      totalBytes += e.size;
+    }
+    if (totalBytes > caps.totalBytes) {
+      throw new Error('Archive exceeds the total unpack size limit');
     }
 
-    let files = 0;
-    let bytes = 0;
-    for await (const file of walkFiles(out)) {
+    const batches = [];
+    let batch = [];
+    let batchBytes = 0;
+    for (const e of entries) {
+      if (batch.length >= BATCH_FILES || (batch.length > 0 && batchBytes + e.size > BATCH_BYTES)) {
+        batches.push(batch);
+        batch = [];
+        batchBytes = 0;
+      }
+      batch.push(e);
+      batchBytes += e.size;
+    }
+    if (batch.length > 0) batches.push(batch);
+
+    let notes = '';
+    for (let bi = 0; bi < batches.length; bi++) {
       if (currentJob?.cancelled) throw new Error('cancelled');
-      const stat = await fs.stat(file);
-      const rel = safeRelPath(relative(out, file).split(sep).join('/'));
-      if (!rel) continue;
-      if (files + 1 > caps.files) throw new Error(`Archive exceeds the ${caps.files} file unpack limit`);
-      if (stat.size > caps.fileBytes) throw new Error(`File ${rel} exceeds the per-file unpack limit`);
-      if (bytes + stat.size > caps.totalBytes) throw new Error('Archive exceeds the total unpack size limit');
 
-      const destKey = prefix + rel;
-      await uploadFile(client, r2, destKey, file, stat.size);
-      await callback({ jobId, type: 'file', path: rel, size: stat.size, contentType: contentTypeFor(rel) }, payload);
-      files++;
-      bytes += stat.size;
+      // Fresh output dir per batch; the previous batch is fully uploaded.
+      await fs.rm(out, { recursive: true, force: true });
+      await fs.mkdir(out, { recursive: true });
+
+      const listFile = join(work, `batch-${bi}.txt`);
+      await fs.writeFile(listFile, batches[bi].map((e) => e.path).join('\n'), 'utf8');
+      try {
+        const { stderr } = await execFileAsync(
+          '7zz',
+          ['x', '-y', '-spd', '-scsUTF-8', `-o${out}`, `@${listFile}`, archive],
+          { maxBuffer: 16 * MB },
+        );
+        notes = stderr.split('\n').filter(Boolean).slice(-8).join('\n');
+      } catch (err) {
+        const message = (err.stderr || err.message || '7zz failed').split('\n').filter(Boolean).slice(-8).join('\n');
+        throw new Error(`7zz could not extract this archive: ${message.slice(0, 600)}`);
+      }
+
+      for await (const file of walkFiles(out)) {
+        if (currentJob?.cancelled) throw new Error('cancelled');
+        const stat = await fs.stat(file);
+        const rel = safeRelPath(relative(out, file).split(sep).join('/'));
+        if (!rel) continue;
+        const destKey = prefix + rel;
+        await uploadFile(client, r2, destKey, file, stat.size);
+        await callback({ jobId, type: 'file', path: rel, size: stat.size, contentType: contentTypeFor(rel) }, payload);
+        // Free the disk as soon as the file is safely in R2.
+        await fs.rm(file, { force: true });
+      }
     }
-    if (tail) console.log(`[extract] ${jobId} 7zz notes: ${tail}`);
+    if (notes) console.log(`[extract] ${jobId} 7zz notes: ${notes}`);
     await callback({ jobId, type: 'done' }, payload);
-    console.log(`[extract] ${jobId} done: ${files} files, ${bytes} bytes`);
+    console.log(`[extract] ${jobId} done: ${entries.length} files, ${totalBytes} bytes`);
   } finally {
     await fs.rm(work, { recursive: true, force: true }).catch(() => {});
   }
