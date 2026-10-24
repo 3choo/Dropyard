@@ -4,10 +4,15 @@ import { ApiError } from './lib/http';
 import { adminRoutes } from './routes/admin';
 import { authRoutes } from './routes/auth';
 import { dlRoutes } from './routes/dl';
+import { internalRoutes } from './routes/internal';
 import { projectRoutes } from './routes/projects';
 import { tokenRoutes } from './routes/tokens';
 import { uploadRoutes } from './routes/uploads';
+import { ExtractRunner } from './lib/extract';
 import { requireSession, type AppEnv } from './middleware';
+
+// The extraction container's durable object must be exported from the entry module.
+export { ExtractRunner };
 
 const app = new Hono<AppEnv>();
 
@@ -25,6 +30,7 @@ app.route('/api/projects', projectRoutes);
 app.route('/api/uploads', uploadRoutes);
 app.route('/api/tokens', tokenRoutes);
 app.route('/api/admin', adminRoutes);
+app.route('/api/internal', internalRoutes);
 
 /** Totals for the dashboard rail — any signed-in teammate can read these. */
 app.get('/api/stats', requireSession(), async (c) => {

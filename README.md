@@ -7,6 +7,9 @@ pulls them over stable, token-authenticated URLs.
 
 - Multi-GB uploads from the browser, **resumable across reloads**
   (presigned multipart, straight to R2 — the parts are kept on pause)
+- **Automatic archive unpacking**: upload a `.zip` or `.rar` of the whole
+  build and its contents appear in the release — the archive itself is dropped
+  once everything extracts
 - Releases with notes, digests and rollback-by-republish
 - Deploy tokens (global or per-project) for the FiveM server
 - Email + password accounts, three roles: admin / uploader / viewer
@@ -49,12 +52,48 @@ npx wrangler r2 bucket cors put gitctx --file r2-cors.json
 Deploy:
 
 ```bash
-npm run deploy        # builds the SPA and deploys the Worker
+npm run deploy        # builds the SPA and deploys the Worker (+ RAR container; Docker must be running)
 ```
 
 Open the printed URL → you land on **setup** to create the first admin
 account. Invite teammates under **Admin → Invites**, create a deploy token
 under **Admin → Deploy tokens**, done.
+
+### Archive unpacking (one extra step)
+
+`.zip` uploads are extracted inside the Worker with no extra setup. `.rar`
+support runs a real 7-Zip in a Cloudflare Container, which needs:
+
+1. **Docker running** on the machine that deploys (`wrangler deploy` builds the
+   image from `container/`).
+2. The R2 S3 credentials from the setup above (the container reads and writes
+   storage directly).
+3. A shared secret the container uses to call back home:
+
+```bash
+npx wrangler secret put EXTRACT_CALLBACK_SECRET   # any long random string
+```
+
+Then apply the v2 migration once:
+
+```bash
+npx wrangler d1 migrations apply gitctx --remote
+```
+
+How it behaves:
+
+- Extraction starts the moment an archive finishes uploading into a **draft**
+  release. ZIPs of any size stream through the Worker; RARs (including
+  multi-volume `.part1.rar` / `.part2.rar` sets) unpack in the container.
+- When the unpack succeeds the archive is deleted — the release holds only the
+  extracted files, so the updater never downloads it twice. If it fails, the
+  archive stays and the release page shows a **Retry** button.
+- Publishing is blocked while an archive is still unpacking.
+- Continuation volumes (`.part2.rar`, `.r00`, …) never trigger extraction on
+  their own: upload all parts, then hit Retry on the failed first-volume job.
+- Limits (tunable in `wrangler.jsonc`): `MAX_UNPACK_FILES` (20000),
+  `MAX_UNPACK_FILE_MB` (5120), `MAX_UNPACK_TOTAL_MB` (51200). Unpacking a huge
+  ZIP is CPU-bound in the Worker, which is why `limits.cpu_ms` is raised.
 
 ### Custom domain later
 
@@ -72,6 +111,11 @@ npm run dev:web       # Vite on :5173, proxies /api and /dl to :8787
 Local note: presigned uploads need real R2 S3 credentials, so in local dev
 files are limited to the single-stream limit (~90 MB). Use
 `wrangler dev --remote` or deploy to exercise the true multipart path.
+
+Local note 2: RAR unpacking works locally too — create a `.dev.vars` file
+containing `EXTRACT_CALLBACK_SECRET=dev-secret`, keep Docker running, and
+`wrangler dev` will build the container image on first RAR upload. ZIP
+unpacking needs no extra setup anywhere.
 
 ## FiveM server side
 
@@ -105,6 +149,7 @@ src/index.ts (Hono)
    ├── /api/auth/*      sessions, invites, first-run setup
    ├── /api/projects/*  projects, releases, publish, machine manifest
    ├── /api/uploads/*   upload sessions: presigned parts + single-stream
+   ├── /api/internal/*  extraction container callbacks (shared-secret auth)
    ├── /api/admin/*     members, invites, tokens, audit, webhook
    ├── /dl/*            streaming downloads from R2 (Range + ETag support)
    └── D1 metadata, R2 objects at p/<project>/r/<release>/<path>
@@ -114,6 +159,12 @@ Uploads above ~90 MB never pass through the Worker: the browser PUTs 64 MB
 parts directly to R2 using presigned URLs (each part carries a SHA-256 that
 R2 verifies), which is why a 6 GB MLO survives a flaky connection — done
 parts are listed from R2 on resume.
+
+Archives take a detour on completion: a `.zip` is stream-extracted inside the
+Worker (fflate, entries written straight back to R2), while a `.rar` is handed
+to the `gitctx-extract` container (7-Zip), which downloads the volume set from
+R2, unpacks, uploads each file and reports progress back over
+`/api/internal/extract`.
 
 ## Scripts
 

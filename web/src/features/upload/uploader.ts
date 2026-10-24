@@ -17,9 +17,11 @@ export interface UploadItem {
   etags: Record<number, string>;
   partHashes: Record<number, string>;
   uploadedBytes: number;
-  status: 'queued' | 'starting' | 'active' | 'paused' | 'completing' | 'done' | 'error';
+  status: 'queued' | 'starting' | 'active' | 'paused' | 'completing' | 'unpacking' | 'done' | 'error';
   error?: string;
   digest?: string;
+  /** Set when the server started auto-unpacking this archive after upload. */
+  extractionId?: string;
   bps: number;
   addedAt: number;
 }
@@ -29,7 +31,21 @@ export interface PickedFile {
   path: string;
 }
 
+export interface ExtractionJob {
+  id: string;
+  kind: 'zip' | 'rar';
+  status: 'queued' | 'running' | 'done' | 'failed';
+  filesAdded: number;
+  bytesAdded: number;
+  error: string | null;
+  archives: string[];
+  createdAt: number;
+  finishedAt: number | null;
+}
+
 type Listener = (items: UploadItem[]) => void;
+
+export type UploadNotify = (kind: 'ok' | 'err', message: string) => void;
 
 // --- IndexedDB persistence (File blobs survive reloads) -------------------------
 
@@ -122,8 +138,12 @@ export class UploadEngine {
   private aborts = new Map<string, AbortController>();
   private xhrs = new Map<string, XMLHttpRequest>();
   private pumping = false;
+  private pollTimer: ReturnType<typeof setInterval> | null = null;
 
-  constructor(private releaseId: string) {}
+  constructor(
+    private releaseId: string,
+    private pollTarget?: { slug: string; version: string; notify?: UploadNotify },
+  ) {}
 
   subscribe(fn: Listener): () => void {
     this.listeners.add(fn);
@@ -188,7 +208,8 @@ export class UploadEngine {
     const records = await idbListFor(this.releaseId);
     let resumed = 0;
     for (const r of records) {
-      if (r.item.status === 'done' || r.item.status === 'error') {
+      if (r.item.status === 'done' || r.item.status === 'error' || r.item.status === 'unpacking') {
+        // 'unpacking' records are settled server-side; the file tree refreshes.
         void idbDelete(r.item.id);
         continue;
       }
@@ -240,7 +261,7 @@ export class UploadEngine {
 
   get busy(): boolean {
     return [...this.items.values()].some((i) =>
-      ['queued', 'starting', 'active', 'completing'].includes(i.status),
+      ['queued', 'starting', 'active', 'completing', 'unpacking'].includes(i.status),
     );
   }
 
@@ -352,13 +373,29 @@ export class UploadEngine {
       xhr.onload = () => {
         this.xhrs.delete(id);
         if (xhr.status >= 200 && xhr.status < 300) {
-          this.update(id, {
-            status: 'done',
-            partStates: ['done'],
-            uploadedBytes: item.size,
-            bps: 0,
-          });
-          void idbDelete(id);
+          let extraction: { id: string } | null = null;
+          try {
+            extraction = (JSON.parse(xhr.responseText) as { extraction?: { id: string } | null }).extraction ?? null;
+          } catch {
+            /* no body */
+          }
+          if (extraction) {
+            this.update(id, {
+              status: 'unpacking',
+              extractionId: extraction.id,
+              uploadedBytes: item.size,
+              bps: 0,
+            });
+            this.wakeExtractionPoller();
+          } else {
+            this.update(id, {
+              status: 'done',
+              partStates: ['done'],
+              uploadedBytes: item.size,
+              bps: 0,
+            });
+            void idbDelete(id);
+          }
           resolve();
         } else {
           let message = `Server answered ${xhr.status}`;
@@ -418,8 +455,7 @@ export class UploadEngine {
           this.update(id, { partHashes: hashes });
         }
 
-        // Presign lazily per batch of parts.
-        const signUrl = await this.presignOne(id, n, hash);
+        // Presign lazily per batch of parts; re-presigned after failures.
         setPart(n, 'uploading');
 
         let etag: string | null = null;
@@ -427,9 +463,11 @@ export class UploadEngine {
         for (let attempt = 0; attempt < MAX_PART_RETRIES; attempt++) {
           if (this.aborts.get(id)?.signal.aborted) return;
           try {
+            const signUrl = await this.presignOne(id, n, hash);
             const res = await fetch(signUrl, {
               method: 'PUT',
-              headers: { 'x-amz-checksum-sha256': hash },
+              // Must stay byte-identical to what the server signed into the URL.
+              headers: { 'x-amz-checksum-sha256': hash, 'content-type': itemNow.contentType },
               body: partFile,
               signal: this.aborts.get(id)?.signal,
             });
@@ -437,7 +475,17 @@ export class UploadEngine {
             etag = res.headers.get('etag') ?? '';
             break;
           } catch (err) {
-            lastError = err;
+            // A CORS block or network failure rejects with TypeError and the
+            // body is unreadable — the cached URL may be the problem, so the
+            // next attempt re-presigns fresh.
+            this.presignCache.get(itemNow.serverId!)?.delete(n);
+            lastError =
+              err instanceof TypeError
+                ? new Error(
+                    `Part ${n} was blocked by the browser (CORS or network). ` +
+                      'The R2 bucket CORS policy must allow this origin for PUT requests.',
+                  )
+                : err;
             await new Promise((r) => setTimeout(r, 700 * 2 ** attempt));
           }
         }
@@ -467,12 +515,62 @@ export class UploadEngine {
     for (let n = 1; n <= finalItem.totalParts; n++) {
       parts.push({ n, etag: finalItem.etags[n] ?? '', sha256: finalItem.partHashes[n] ?? '' });
     }
-    const res = await api<{ digest: string }>(`/api/uploads/${finalItem.serverId}/complete`, {
+    const res = await api<{ digest: string; extraction?: { id: string } | null }>(`/api/uploads/${finalItem.serverId}/complete`, {
       method: 'POST',
       body: JSON.stringify({ parts }),
     });
-    this.update(id, { status: 'done', digest: res.digest, uploadedBytes: finalItem.size });
-    void idbDelete(id);
+    if (res.extraction) {
+      this.update(id, {
+        status: 'unpacking',
+        extractionId: res.extraction.id,
+        digest: res.digest,
+        uploadedBytes: finalItem.size,
+      });
+      this.wakeExtractionPoller();
+    } else {
+      this.update(id, { status: 'done', digest: res.digest, uploadedBytes: finalItem.size });
+      void idbDelete(id);
+    }
+  }
+
+  /** Poll the release detail until every active extraction settles. */
+  private wakeExtractionPoller(): void {
+    if (this.pollTimer) return;
+    this.pollTimer = setInterval(() => void this.pollExtractions(), 2500);
+  }
+
+  private async pollExtractions(): Promise<void> {
+    const unpacking = [...this.items.values()].filter((i) => i.status === 'unpacking');
+    if (unpacking.length === 0 || !this.pollTarget) {
+      if (this.pollTimer) {
+        clearInterval(this.pollTimer);
+        this.pollTimer = null;
+      }
+      return;
+    }
+    let jobs: ExtractionJob[];
+    try {
+      const res = await api<{ extractions: ExtractionJob[] }>(
+        `/api/projects/${this.pollTarget.slug}/releases/${this.pollTarget.version}`,
+      );
+      jobs = res.extractions ?? [];
+    } catch {
+      return; // transient; retry on the next tick
+    }
+    const byId = new Map(jobs.map((j) => [j.id, j]));
+    for (const item of unpacking) {
+      const job = item.extractionId ? byId.get(item.extractionId) : undefined;
+      if (!job || (job.status !== 'done' && job.status !== 'failed')) continue;
+      if (job.status === 'done') {
+        this.update(item.id, { status: 'done' });
+        void idbDelete(item.id);
+        this.pollTarget.notify?.('ok', `Unpacked ${item.path} — ${job.filesAdded} file${job.filesAdded === 1 ? '' : 's'} added`);
+      } else {
+        this.update(item.id, { status: 'error', error: job.error ?? 'Unpack failed', bps: 0 });
+        void idbDelete(item.id);
+        this.pollTarget.notify?.('err', `Unpacking ${item.path} failed: ${job.error ?? 'unknown error'}`);
+      }
+    }
   }
 
   private presignCache = new Map<string, Map<number, string>>();
@@ -502,7 +600,7 @@ export class UploadEngine {
     }));
     const res = await api<{ urls: Array<{ n: number; url: string }> }>(
       `/api/uploads/${serverId}/parts`,
-      { method: 'POST', body: JSON.stringify({ parts: payload }) },
+      { method: 'POST', body: JSON.stringify({ parts: payload, contentType: item.contentType }) },
     );
     for (const u of res.urls) cache.set(u.n, u.url);
     const url = cache.get(n);

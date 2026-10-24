@@ -24,6 +24,17 @@ type Release = {
   published_at: number | null;
 };
 type FileRow = { id: string; path: string; size: number; digest: string | null; download_count: number };
+type Extraction = {
+  id: string;
+  kind: 'zip' | 'rar';
+  status: 'queued' | 'running' | 'done' | 'failed';
+  filesAdded: number;
+  bytesAdded: number;
+  error: string | null;
+  archives: string[];
+  createdAt: number;
+  finishedAt: number | null;
+};
 
 export function ReleasePage() {
   const { slug = '', version = '' } = useParams();
@@ -34,7 +45,23 @@ export function ReleasePage() {
 
   const query = useQuery({
     queryKey: ['release', slug, version],
-    queryFn: () => api<{ project: Project; release: Release; files: FileRow[] }>(`/api/projects/${slug}/releases/${version}`),
+    queryFn: () =>
+      api<{ project: Project; release: Release; files: FileRow[]; extractions?: Extraction[] }>(
+        `/api/projects/${slug}/releases/${version}`,
+      ),
+    // Keep live while an archive is unpacking so the tree fills in as files land.
+    refetchInterval: (q) =>
+      (q.state.data?.extractions ?? []).some((j) => j.status === 'queued' || j.status === 'running') ? 2500 : false,
+  });
+
+  const retry = useMutation({
+    mutationFn: (jobId: string) =>
+      api(`/api/projects/${slug}/releases/${version}/extractions/${jobId}/retry`, { method: 'POST' }),
+    onSuccess: () => {
+      toast('Extraction restarted');
+      void query.refetch();
+    },
+    onError: (err) => toast(err instanceof ApiError ? err.message : 'Retry failed', 'err'),
   });
 
   const publish = useMutation({
@@ -67,6 +94,7 @@ export function ReleasePage() {
   }
 
   const { project, release, files } = query.data;
+  const extractions = query.data.extractions ?? [];
   const canUpload = user?.role === 'admin' || user?.role === 'uploader';
   const isAdmin = user?.role === 'admin';
   const dlHref = (path: string) => `/dl/${slug}/v/${version}?path=${encodeURIComponent(path)}`;
@@ -131,6 +159,47 @@ export function ReleasePage() {
         <div className="mt-5 rounded-xl border border-warn/30 bg-warn-dim/50 px-4 py-3 text-[12.5px] leading-relaxed text-warn">
           This release is a draft — invisible to deploy tokens and the updater. Publish it once every file has
           landed; after that it is immutable.
+        </div>
+      ) : null}
+
+      {extractions.length > 0 ? (
+        <div className="mt-4 space-y-2">
+          {extractions.map((job) => {
+            const archive = job.archives[0]?.split('/').pop() ?? 'archive';
+            const live = job.status === 'queued' || job.status === 'running';
+            return (
+              <div
+                key={job.id}
+                className={`flex items-center gap-3 rounded-xl border px-4 py-2.5 text-[12.5px] ${
+                  job.status === 'failed'
+                    ? 'border-danger/40 bg-danger-dim/40'
+                    : live
+                      ? 'border-line bg-panel'
+                      : 'border-accent/25 bg-panel'
+                }`}
+              >
+                <span
+                  className={`shrink-0 font-mono text-[11px] uppercase ${
+                    job.status === 'failed' ? 'text-danger' : live ? 'text-ink-2' : 'text-accent'
+                  }`}
+                >
+                  {job.status === 'queued' || job.status === 'running'
+                    ? `unpacking ${job.kind}…`
+                    : job.status === 'done'
+                      ? `unpacked ${job.kind}`
+                      : `unpack failed`}
+                </span>
+                <span className="min-w-0 flex-1 truncate font-mono text-ink-2" title={job.error ?? archive}>
+                  {job.status === 'failed' ? job.error : `${archive} → ${job.filesAdded} files · ${formatBytes(job.bytesAdded)}`}
+                </span>
+                {job.status === 'failed' && canUpload && release.status === 'draft' ? (
+                  <Button variant="secondary" className="h-7" loading={retry.isPending && retry.variables === job.id} onClick={() => retry.mutate(job.id)}>
+                    Retry
+                  </Button>
+                ) : null}
+              </div>
+            );
+          })}
         </div>
       ) : null}
 

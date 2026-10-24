@@ -197,7 +197,10 @@ function UploadPhase({
   notes: string;
 }) {
   const navigate = useNavigate();
-  const engine = useMemo(() => new UploadEngine(releaseId), [releaseId]);
+  const engine = useMemo(
+    () => new UploadEngine(releaseId, { slug, version, notify: (kind, message) => toast(message, kind) }),
+    [releaseId, slug, version],
+  );
   const [items, setItems] = useState<UploadItem[]>([]);
   const [dragOver, setDragOver] = useState(false);
   const [resumable, setResumable] = useState(0);
@@ -370,7 +373,7 @@ function UploadPhase({
             loading={publish.isPending}
             onClick={() => publish.mutate()}
           >
-            {busy ? 'Uploading…' : `Publish v${version}`}
+            {busy ? (items.some((i) => i.status === 'unpacking') ? 'Unpacking…' : 'Uploading…') : `Publish v${version}`}
           </Button>
           <Button variant="ghost" className="h-8 w-full" onClick={() => setDiscardOpen(true)}>
             Discard draft
@@ -402,6 +405,7 @@ const STATUS_LABEL: Record<UploadItem['status'], string> = {
   active: 'uploading',
   paused: 'paused',
   completing: 'assembling',
+  unpacking: 'unpacking…',
   done: 'complete',
   error: 'failed',
 };
@@ -440,7 +444,7 @@ function UploadRow({ item, engine }: { item: UploadItem; engine: UploadEngine })
               ? 'text-accent'
               : item.status === 'error'
                 ? 'text-danger'
-                : item.status === 'active' || item.status === 'completing'
+                : item.status === 'active' || item.status === 'completing' || item.status === 'unpacking'
                   ? 'text-ink-2'
                   : 'text-ink-3'
           }`}
@@ -487,7 +491,10 @@ function UploadRow({ item, engine }: { item: UploadItem; engine: UploadEngine })
 
       {item.status === 'error' && item.error ? (
         <p className="mt-2 rounded-lg border border-danger/30 bg-danger-dim/50 px-2.5 py-1.5 text-[11.5px] leading-relaxed text-danger">
-          {item.error} — resume to retry from where it stopped.
+          {item.error}
+          {item.extractionId
+            ? ' — the archive was kept; retry the unpack from the release page.'
+            : ' — resume to retry from where it stopped.'}
         </p>
       ) : null}
       {item.status === 'paused' ? (

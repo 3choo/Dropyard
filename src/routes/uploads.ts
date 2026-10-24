@@ -1,5 +1,6 @@
 import { Hono } from 'hono';
 import { audit } from '../lib/audit';
+import { maybeStartExtraction } from '../lib/extract';
 import { badRequest, conflict, notFound, tooLarge } from '../lib/http';
 import { nowMs, randomId, sanitizeFilePath, sha256Hex } from '../lib/ids';
 import { MAX_OBJECT_BYTES, R2S3, partSizeFor } from '../lib/r2s3';
@@ -135,18 +136,24 @@ uploadRoutes.post('/:id/parts', async (c) => {
   const upload = await loadUpload(c.env.DB, c.req.param('id'));
   if (upload.status !== 'active') throw conflict(`Upload is ${upload.status}`);
   if (upload.mode !== 'presigned' || !upload.s3_upload_id) throw badRequest('Not a presigned multipart upload');
-  const body = await c.req.json<{ parts?: Array<{ n?: number; sha256?: string }> }>().catch(() => null);
+  const body = await c.req
+    .json<{ parts?: Array<{ n?: number; sha256?: string }>; contentType?: unknown }>()
+    .catch(() => null);
   const parts = body?.parts;
   if (!Array.isArray(parts) || parts.length === 0 || parts.length > 1000) {
     throw badRequest('Provide 1–1000 parts per batch');
   }
+  const contentType =
+    typeof body?.contentType === 'string' && body.contentType.length > 0 && body.contentType.length <= 255
+      ? body.contentType
+      : 'application/octet-stream';
   const s3 = new R2S3(c.env);
   const urls: Array<{ n: number; url: string }> = [];
   for (const p of parts) {
     if (typeof p.n !== 'number' || p.n < 1 || p.n > upload.total_parts || typeof p.sha256 !== 'string') {
       throw badRequest('Each part needs a number within range and a base64 SHA-256');
     }
-    urls.push({ n: p.n, url: await s3.presignPart(upload.r2_key, upload.s3_upload_id, p.n, p.sha256) });
+    urls.push({ n: p.n, url: await s3.presignPart(upload.r2_key, upload.s3_upload_id, p.n, p.sha256, contentType) });
   }
   return c.json({ urls });
 });
@@ -163,7 +170,14 @@ uploadRoutes.put('/:id/body', async (c) => {
   });
   await finalizeFile(c.env, upload, null, []);
   await audit(c.env.DB, sessionUser(c).email, 'upload.complete', upload.r2_key, { size: upload.size, mode: 'single' });
-  return c.json({ ok: true, size: upload.size });
+  const extraction = await maybeStartExtraction(c.env, (p) => c.executionCtx.waitUntil(p), {
+    origin: new URL(c.req.url).origin,
+    releaseId: upload.release_id,
+    path: upload.r2_key.split('/').slice(4).join('/'),
+    r2Key: upload.r2_key,
+    userId: sessionUser(c).id,
+  });
+  return c.json({ ok: true, size: upload.size, extraction });
 });
 
 /** Complete a presigned multipart upload and verify the stored object. */
@@ -201,7 +215,14 @@ uploadRoutes.post('/:id/complete', async (c) => {
   const digest = await sha256Hex(partDigests.map((p) => p.sha256).join(''));
   await finalizeFile(c.env, upload, digest, partDigests);
   await audit(c.env.DB, sessionUser(c).email, 'upload.complete', upload.r2_key, { size: upload.size, mode: 'presigned' });
-  return c.json({ ok: true, size: upload.size, digest });
+  const extraction = await maybeStartExtraction(c.env, (p) => c.executionCtx.waitUntil(p), {
+    origin: new URL(c.req.url).origin,
+    releaseId: upload.release_id,
+    path: upload.r2_key.split('/').slice(4).join('/'),
+    r2Key: upload.r2_key,
+    userId: sessionUser(c).id,
+  });
+  return c.json({ ok: true, size: upload.size, digest, extraction });
 });
 
 /** List parts already stored in R2, so a reloaded page can resume. */

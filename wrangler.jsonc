@@ -5,6 +5,11 @@
   "compatibility_date": "2026-10-24",
   "compatibility_flags": ["nodejs_compat"],
 
+  "dev": {
+    // Local dev can't build containers on Windows; deploys are unaffected.
+    "enable_containers": false
+  },
+
   "assets": {
     "directory": "./web/dist",
     "binding": "ASSETS",
@@ -22,10 +27,33 @@
     }
   ],
 
+  // RAR extraction runs in a container (ZIP is stream-extracted in the Worker).
+  // Building the image requires Docker; `wrangler deploy` handles the build.
+  "containers": [
+    {
+      "name": "gitctx-extract",
+      "class_name": "ExtractRunner",
+      "image": "./container/Dockerfile",
+      "image_build_context": "./container",
+      "max_instances": 5,
+      "instance_type": "standard-1"
+    }
+  ],
+  "durable_objects": {
+    "bindings": [{ "name": "EXTRACT_RUNNER", "class_name": "ExtractRunner" }]
+  },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["ExtractRunner"] }],
+
+  // Extraction is CPU-heavy for big zips (inflate + R2 writes).
+  "limits": { "cpu_ms": 300000 },
+
   "vars": {
     "R2_S3_ACCOUNT_ID": "",
     "R2_BUCKET_NAME": "gitctx",
-    "MAX_SINGLE_UPLOAD_MB": "90"
+    "MAX_SINGLE_UPLOAD_MB": "90",
+    "MAX_UNPACK_FILES": "20000",
+    "MAX_UNPACK_FILE_MB": "5120",
+    "MAX_UNPACK_TOTAL_MB": "51200"
   },
 
   "observability": { "enabled": true, "head_sampling_rate": 1 }

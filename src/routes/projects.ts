@@ -1,5 +1,6 @@
 import { Hono, type Context } from 'hono';
 import { audit } from '../lib/audit';
+import { retryExtraction, type ExtractJobRow } from '../lib/extract';
 import { badRequest, conflict, forbidden, notFound } from '../lib/http';
 import { nowMs, randomId, sanitizeFilePath, sha256Hex, slugify } from '../lib/ids';
 import { requireAuthAny, requireRole, requireSession, sessionUser, type AppEnv } from '../middleware';
@@ -42,6 +43,27 @@ type FileRow = {
 };
 
 const VERSION_RE = /^[0-9]+(\.[0-9]+){0,3}(-[a-z0-9.]+)?$/i;
+
+function presentExtraction(job: ExtractJobRow) {
+  let archives: string[] = [];
+  try {
+    const parsed = JSON.parse(job.archive_paths) as Array<{ path: string }>;
+    if (Array.isArray(parsed)) archives = parsed.map((v) => v.path);
+  } catch {
+    // keep empty
+  }
+  return {
+    id: job.id,
+    kind: job.kind,
+    status: job.status,
+    filesAdded: job.files_added,
+    bytesAdded: job.bytes_added,
+    error: job.error,
+    archives,
+    createdAt: job.created_at,
+    finishedAt: job.finished_at,
+  };
+}
 
 function normalizeVersion(v: string): string {
   return v.trim().replace(/^v/i, '');
@@ -252,7 +274,11 @@ projectRoutes.get('/:slug/releases/:version', requireAuthAny(), async (c) => {
     .prepare('SELECT id, path, size, content_type, digest, download_count, created_at FROM release_files WHERE release_id = ? ORDER BY path')
     .bind(release.id)
     .all();
-  return c.json({ project, release, files: files.results });
+  const jobs = await c.env.DB
+    .prepare('SELECT * FROM extract_jobs WHERE release_id = ? ORDER BY created_at DESC')
+    .bind(release.id)
+    .all<ExtractJobRow>();
+  return c.json({ project, release, files: files.results, extractions: jobs.results.map(presentExtraction) });
 });
 
 projectRoutes.patch('/:slug/releases/:version', requireRole('admin', 'uploader'), async (c) => {
@@ -285,6 +311,13 @@ projectRoutes.post('/:slug/releases/:version/publish', requireRole('admin', 'upl
     .bind(release.id)
     .first<{ n: number }>();
   if ((files?.n ?? 0) === 0) throw badRequest('Upload at least one file before publishing');
+  const pendingJobs = await c.env.DB
+    .prepare("SELECT COUNT(*) AS n FROM extract_jobs WHERE release_id = ? AND status IN ('queued','running')")
+    .bind(release.id)
+    .first<{ n: number }>();
+  if ((pendingJobs?.n ?? 0) > 0) {
+    throw conflict('Archives are still unpacking — wait for extraction to finish before publishing');
+  }
 
   const digest = await releaseDigest(release, c.env.DB);
   await c.env.DB.batch([
@@ -317,6 +350,29 @@ projectRoutes.post('/:slug/releases/:version/publish', requireRole('admin', 'upl
     );
   }
   return c.json({ ok: true, version: release.version, digest });
+});
+
+projectRoutes.post('/:slug/releases/:version/extractions/:jobId/retry', requireRole('admin', 'uploader'), async (c) => {
+  const project = await getProjectBySlug(c.env.DB, c.req.param('slug') ?? '');
+  if (!project) throw notFound('Project not found');
+  const release = await getRelease(c.env.DB, project.id, c.req.param('version'));
+  if (!release) throw notFound('Release not found');
+  if (release.status !== 'draft') throw conflict('Published releases are immutable');
+  const jobId = c.req.param('jobId') ?? '';
+  const job = await c.env.DB
+    .prepare('SELECT release_id FROM extract_jobs WHERE id = ?')
+    .bind(jobId)
+    .first<{ release_id: string }>();
+  if (!job || job.release_id !== release.id) throw notFound('Extraction job not found');
+  try {
+    const next = await retryExtraction(c.env, (p) => c.executionCtx.waitUntil(p), {
+      origin: new URL(c.req.url).origin,
+      jobId,
+    });
+    return c.json({ extraction: presentExtraction(next) }, 201);
+  } catch (err) {
+    throw badRequest(err instanceof Error ? err.message : 'Retry failed');
+  }
 });
 
 projectRoutes.delete('/:slug/releases/:version', requireRole('admin', 'uploader'), async (c) => {

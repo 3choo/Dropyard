@@ -11,6 +11,8 @@ declare global {
     R2_ACCESS_KEY_ID?: string;
     /** Worker secret, not in wrangler.jsonc. */
     R2_SECRET_ACCESS_KEY?: string;
+    /** Worker secret shared with the extraction container, not in wrangler.jsonc. */
+    EXTRACT_CALLBACK_SECRET?: string;
   }
 }
 
@@ -90,7 +92,14 @@ export class R2S3 {
     return unescapeXml(uploadId);
   }
 
-  /** Presign a part PUT; the browser must send the same checksum header. */
+  /**
+   * Presign a part PUT. aws4fetch skips content-type when signing unless
+   * allHeaders is set, but browsers implicitly send a Content-Type derived
+   * from the Blob's MIME type — R2 rejects the mismatch, and the resulting
+   * error response carries no CORS headers, so the browser only reports a
+   * vague CORS failure. Always sign content-type and have the client send
+   * the byte-identical value.
+   */
   async presignPart(
     key: string,
     uploadId: string,
@@ -102,11 +111,25 @@ export class R2S3 {
     const url = this.objectUrl(key, { partNumber: String(partNumber), uploadId });
     const headers = new Headers();
     if (sha256B64) headers.set('x-amz-checksum-sha256', sha256B64);
-    if (contentType) headers.set('content-type', contentType);
+    headers.set('content-type', contentType || 'application/octet-stream');
     const signed = await this.client.sign(new Request(url, { method: 'PUT', headers }), {
-      aws: { signQuery: true },
+      aws: { signQuery: true, allHeaders: true },
     });
     return signed.url;
+  }
+
+  /** Server-side part upload, used when extracting archives into R2. */
+  async uploadPart(key: string, uploadId: string, partNumber: number, body: ArrayBuffer): Promise<string> {
+    this.requireEnabled();
+    const res = await this.client.fetch(this.objectUrl(key, { partNumber: String(partNumber), uploadId }), {
+      method: 'PUT',
+      body,
+    });
+    if (!res.ok) {
+      const text = await res.text().catch(() => '');
+      throw new ApiError(502, 's3_error', `R2 rejected part ${partNumber}: ${text.slice(0, 300)}`);
+    }
+    return res.headers.get('etag') ?? '';
   }
 
   async listParts(key: string, uploadId: string): Promise<ListedPart[]> {
