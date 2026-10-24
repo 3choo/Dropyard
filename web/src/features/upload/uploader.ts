@@ -131,6 +131,45 @@ async function sha256B64(bytes: ArrayBuffer): Promise<string> {
   return btoa(String.fromCharCode(...new Uint8Array(digest)));
 }
 
+/**
+ * PUT a blob with upload progress. fetch() exposes no upload-progress events,
+ * so parts are sent over XHR to keep the progress bar live mid-part.
+ * Rejects with TypeError on network/CORS failure (matches fetch semantics —
+ * callers special-case it) and with an "AbortError" DOMException on abort.
+ */
+function xhrPut(
+  url: string,
+  body: Blob,
+  headers: Record<string, string>,
+  signal: AbortSignal | undefined,
+  label: string,
+  onProgress: (loaded: number) => void,
+): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open('PUT', url);
+    for (const [k, v] of Object.entries(headers)) xhr.setRequestHeader(k, v);
+    xhr.upload.onprogress = (e) => onProgress(e.loaded);
+    xhr.onload = () => {
+      if (xhr.status >= 200 && xhr.status < 300) {
+        resolve(xhr.getResponseHeader('etag') ?? '');
+      } else {
+        reject(new Error(`${label} failed (${xhr.status})`));
+      }
+    };
+    xhr.onerror = () => reject(new TypeError(`${label} blocked by the browser (CORS or network)`));
+    xhr.onabort = () => reject(new DOMException('Aborted', 'AbortError'));
+    if (signal) {
+      if (signal.aborted) {
+        reject(new DOMException('Aborted', 'AbortError'));
+        return;
+      }
+      signal.addEventListener('abort', () => xhr.abort(), { once: true });
+    }
+    xhr.send(body);
+  });
+}
+
 export class UploadEngine {
   private items = new Map<string, UploadItem>();
   private files = new Map<string, File>();
@@ -348,8 +387,9 @@ export class UploadEngine {
       }
       this.aborts.delete(id);
     } catch (err) {
+      const wasPaused = this.aborts.get(id)?.signal.aborted ?? false;
       this.aborts.delete(id);
-      if (this.aborts.get(id)?.signal.aborted) return; // deliberate pause
+      if (wasPaused) return; // deliberate pause
       const message =
         err instanceof ApiError ? err.message : err instanceof Error ? err.message : 'Upload failed';
       this.update(id, { status: 'error', error: message, bps: 0 });
@@ -437,6 +477,19 @@ export class UploadEngine {
       if (this.items.get(id)?.partStates[n - 1] !== 'done') missing.push(n);
     }
 
+    // Bytes already on R2 when this run started (resumed sessions), plus the
+    // live per-part counters; uploadedBytes is recomputed from both so the
+    // progress bar moves while a single 64 MB part is still in flight.
+    const baseBytes = this.items.get(id)!.uploadedBytes;
+    const partLoaded = new Map<number, number>();
+    const reportProgress = (n: number, loaded: number) => {
+      partLoaded.set(n, loaded);
+      let uploaded = baseBytes;
+      for (const v of partLoaded.values()) uploaded += v;
+      const elapsed = (performance.now() - started) / 1000;
+      this.update(id, { uploadedBytes: uploaded, bps: elapsed > 0 ? uploaded / elapsed : 0 }, false);
+    };
+
     let cursorIdx = 0;
     const workers = Array.from({ length: Math.min(PART_CONCURRENCY, missing.length) }, async () => {
       for (;;) {
@@ -462,22 +515,24 @@ export class UploadEngine {
         let lastError: unknown = null;
         for (let attempt = 0; attempt < MAX_PART_RETRIES; attempt++) {
           if (this.aborts.get(id)?.signal.aborted) return;
+          partLoaded.set(n, 0);
           try {
             const signUrl = await this.presignOne(id, n, hash);
-            const res = await fetch(signUrl, {
-              method: 'PUT',
+            etag = await xhrPut(
+              signUrl,
+              partFile,
               // Must stay byte-identical to what the server signed into the URL.
-              headers: { 'x-amz-checksum-sha256': hash, 'content-type': itemNow.contentType },
-              body: partFile,
-              signal: this.aborts.get(id)?.signal,
-            });
-            if (!res.ok) throw new Error(`Part ${n} PUT failed (${res.status})`);
-            etag = res.headers.get('etag') ?? '';
+              { 'x-amz-checksum-sha256': hash, 'content-type': itemNow.contentType },
+              this.aborts.get(id)?.signal,
+              `Part ${n} PUT`,
+              (loaded) => reportProgress(n, loaded),
+            );
             break;
           } catch (err) {
             // A CORS block or network failure rejects with TypeError and the
             // body is unreadable — the cached URL may be the problem, so the
-            // next attempt re-presigns fresh.
+            // next attempt re-presigns fresh. AbortError from pause() falls
+            // into the same path and is caught by the aborted check above.
             this.presignCache.get(itemNow.serverId!)?.delete(n);
             lastError =
               err instanceof TypeError
@@ -494,14 +549,16 @@ export class UploadEngine {
           throw lastError instanceof Error ? lastError : new Error(`Part ${n} failed after retries`);
         }
 
+        partLoaded.set(n, length);
         const etags = { ...this.items.get(id)!.etags, [n]: etag };
         const prev = this.items.get(id)!;
         const elapsed = (performance.now() - started) / 1000;
+        const uploaded = baseBytes + [...partLoaded.values()].reduce((s, v) => s + v, 0);
         this.update(id, {
           partStates: prev.partStates.map((s, i) => (i === n - 1 ? 'done' : s)),
           etags,
-          uploadedBytes: prev.uploadedBytes + length,
-          bps: elapsed > 0 ? prev.uploadedBytes / elapsed : 0,
+          uploadedBytes: uploaded,
+          bps: elapsed > 0 ? uploaded / elapsed : 0,
         });
       }
     });
