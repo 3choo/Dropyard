@@ -58,10 +58,10 @@ export function ProjectPage() {
 
   return (
     <div className="mx-auto max-w-4xl px-5 py-8 md:px-8 md:py-10">
-      <div className="flex items-start justify-between gap-4">
+      <div className="flex flex-col gap-4 md:flex-row md:items-start md:justify-between md:gap-4">
         <div className="min-w-0">
-          <div className="flex items-center gap-3">
-            <h1 className="truncate text-[22px] font-semibold tracking-[-0.02em]">{project.name}</h1>
+          <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
+            <h1 className="text-[22px] font-semibold tracking-[-0.02em] md:truncate">{project.name}</h1>
             <span className="rounded-md border border-line bg-panel px-1.5 py-0.5 font-mono text-[11px] text-ink-3">
               {project.slug}
             </span>
@@ -110,23 +110,40 @@ export function ProjectPage() {
           ) : undefined}
         />
       ) : (
-        <div className="relative ml-1 border-l border-line pl-6">
+        <div>
           {releases.map((r, i) => (
             <motion.div
               key={r.id}
-              className="relative pb-5"
+              className="relative flex pb-6 last:pb-0"
               initial={{ opacity: 0, x: -6 }}
               animate={{ opacity: 1, x: 0 }}
               transition={{ delay: Math.min(i * 0.04, 0.35), duration: 0.4, ease: [0.16, 1, 0.3, 1] }}
             >
-              <span
-                className={`absolute -left-[31px] top-1.5 h-2 w-2 rounded-full border-2 ${
-                  r.is_latest ? 'border-accent bg-accent' : 'border-line-2 bg-ground'
-                }`}
-              />
+              <div className="hidden w-24 shrink-0 md:block">
+                <div className="pt-1 text-right">
+                  <div className="font-mono text-[12.5px] font-medium leading-[1.4] tnum">v{r.version}</div>
+                  <div className="mt-0.5 font-mono text-[10.5px] leading-[1.4] text-ink-3 tnum">
+                    {timeAgo(r.published_at ?? r.created_at)}
+                  </div>
+                </div>
+              </div>
+              <div className="relative mx-4 w-2.5 shrink-0 self-stretch">
+                {i < releases.length - 1 ? (
+                  <span className="absolute -bottom-[13px] left-1/2 top-[13px] w-px -translate-x-1/2 bg-line-2" />
+                ) : null}
+                <span
+                  className={`absolute left-1/2 top-[13px] h-2.5 w-2.5 -translate-x-1/2 -translate-y-1/2 rounded-full ${
+                    r.is_latest
+                      ? 'bg-accent'
+                      : r.status === 'draft'
+                        ? 'border-2 border-warn bg-ground'
+                        : 'border-2 border-line-2 bg-ground'
+                  }`}
+                />
+              </div>
               <Link
                 to={`/p/${slug}/r/${r.version}`}
-                className="group block rounded-xl border border-line bg-panel px-4 py-3 transition-colors hover:border-line-2 hover:bg-panel-2/60"
+                className="group block min-w-0 flex-1 rounded-xl border border-line bg-panel px-4 py-3 transition-colors hover:border-line-2 hover:bg-panel-2/60"
               >
                 <div className="flex items-center gap-2.5">
                   <span className="font-mono text-[13.5px] font-medium">v{r.version}</span>
@@ -134,11 +151,11 @@ export function ProjectPage() {
                   {r.status === 'draft' ? <Chip tone="warn">draft</Chip> : null}
                   <span className="min-w-0 flex-1 truncate text-[13px] text-ink-2">{r.title || '—'}</span>
                 </div>
-                <div className="mt-1.5 flex items-center gap-4 font-mono text-[11px] text-ink-3 tnum">
-                  <span>{r.files_count} files</span>
-                  <span>{formatBytes(r.size, 0)}</span>
-                  <span>{r.download_count} downloads</span>
-                  <span className="ml-auto">{timeAgo(r.published_at ?? r.created_at)}</span>
+                <div className="mt-1.5 flex flex-wrap items-center gap-x-4 gap-y-0.5 font-mono text-[11px] text-ink-3 tnum">
+                  <span className="whitespace-nowrap">{r.files_count} files</span>
+                  <span className="whitespace-nowrap">{formatBytes(r.size, 0)}</span>
+                  <span className="whitespace-nowrap">{r.download_count} downloads</span>
+                  <span className="ml-auto whitespace-nowrap">{timeAgo(r.published_at ?? r.created_at)}</span>
                 </div>
               </Link>
             </motion.div>
