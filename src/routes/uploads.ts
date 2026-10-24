@@ -153,7 +153,9 @@ uploadRoutes.post('/:id/parts', async (c) => {
     if (typeof p.n !== 'number' || p.n < 1 || p.n > upload.total_parts || typeof p.sha256 !== 'string') {
       throw badRequest('Each part needs a number within range and a base64 SHA-256');
     }
-    urls.push({ n: p.n, url: await s3.presignPart(upload.r2_key, upload.s3_upload_id, p.n, p.sha256, contentType) });
+    // p.sha256 is not signed into the URL: R2 rejects checksum headers on
+    // UploadPart with 501; the digest is sent to /complete instead.
+    urls.push({ n: p.n, url: await s3.presignPart(upload.r2_key, upload.s3_upload_id, p.n, contentType) });
   }
   return c.json({ urls });
 });

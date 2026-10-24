@@ -521,8 +521,10 @@ export class UploadEngine {
             etag = await xhrPut(
               signUrl,
               partFile,
-              // Must stay byte-identical to what the server signed into the URL.
-              { 'x-amz-checksum-sha256': hash, 'content-type': itemNow.contentType },
+              // Content-type must stay byte-identical to what the server signed
+              // into the URL. No x-amz-checksum-sha256 here: R2 does not implement
+              // checksum headers on UploadPart (501), digests go to /complete.
+              { 'content-type': itemNow.contentType },
               this.aborts.get(id)?.signal,
               `Part ${n} PUT`,
               (loaded) => reportProgress(n, loaded),

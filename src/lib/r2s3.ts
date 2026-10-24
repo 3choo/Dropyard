@@ -99,18 +99,22 @@ export class R2S3 {
    * error response carries no CORS headers, so the browser only reports a
    * vague CORS failure. Always sign content-type and have the client send
    * the byte-identical value.
+   *
+   * x-amz-checksum-sha256 must NOT be signed or sent here: R2 does not
+   * implement checksum headers on UploadPart (only Content-MD5) and answers
+   * 501 NotImplemented, which the browser then masks as a CORS failure.
+   * Part integrity is covered by the client-computed SHA-256 digests sent
+   * to /complete instead.
    */
   async presignPart(
     key: string,
     uploadId: string,
     partNumber: number,
-    sha256B64?: string,
     contentType?: string,
   ): Promise<string> {
     this.requireEnabled();
     const url = this.objectUrl(key, { partNumber: String(partNumber), uploadId });
     const headers = new Headers();
-    if (sha256B64) headers.set('x-amz-checksum-sha256', sha256B64);
     headers.set('content-type', contentType || 'application/octet-stream');
     const signed = await this.client.sign(new Request(url, { method: 'PUT', headers }), {
       aws: { signQuery: true, allHeaders: true },
