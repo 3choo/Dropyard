@@ -57,3 +57,29 @@ export function contentTypeForPath(path: string): string {
   const match = EXT_RE.exec(path);
   return (match && TYPES[match[1]!.toLowerCase()]) || 'application/octet-stream';
 }
+
+/**
+ * Extensions the file viewer/editor treats as text. Liberal by design — a
+ * "text" path holding binary junk still fails the strict UTF-8 decode and
+ * falls back to the binary page. Extensionless files (LICENSE, Dockerfile)
+ * are also attempted as text.
+ */
+const TEXT_EXTS = new Set([
+  'txt', 'text', 'md', 'markdown', 'log', 'csv', 'tsv',
+  'lua', 'cfg', 'conf', 'ini', 'env', 'properties', 'meta', 'toml', 'yml', 'yaml', 'json', 'jsonc',
+  'xml', 'html', 'htm', 'svg', 'css', 'scss', 'less',
+  'js', 'mjs', 'cjs', 'ts', 'tsx', 'jsx', 'vue', 'svelte',
+  'sql', 'sh', 'bash', 'zsh', 'fish', 'ps1', 'psm1', 'bat', 'cmd',
+  'c', 'h', 'cpp', 'hpp', 'cs', 'py', 'rb', 'go', 'java', 'rs', 'php',
+  'diff', 'patch', 'gitignore', 'gitattributes', 'editorconfig', 'npmrc', 'nvmrc', 'lock',
+]);
+
+export function isTextPath(path: string): boolean {
+  const base = path.split('/').pop() ?? '';
+  const match = EXT_RE.exec(base);
+  if (!match) return !base.includes('.'); // LICENSE, Dockerfile, .gitignore-style names
+  return TEXT_EXTS.has(match[1]!.toLowerCase());
+}
+
+/** Cap for serving/decoding file content inline in the viewer and editor. */
+export const MAX_TEXT_BLOB_BYTES = 1_000_000;

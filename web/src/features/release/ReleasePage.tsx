@@ -220,7 +220,11 @@ export function ReleasePage() {
           {files.length === 0 ? (
             <p className="px-3 py-6 text-center text-[13px] text-ink-3">No files in this release yet.</p>
           ) : (
-            <FileTree files={files.map((f) => ({ path: f.path, size: f.size, digest: f.digest }))} hrefFor={(f) => dlHref(f.path)} />
+            <FileTree
+              files={files.map((f) => ({ path: f.path, size: f.size, digest: f.digest }))}
+              hrefFor={(f) => dlHref(f.path)}
+              viewHrefFor={(f) => `/p/${slug}/r/${version}/file/${f.path.split('/').map(encodeURIComponent).join('/')}`}
+            />
           )}
         </div>
       </section>

@@ -1,4 +1,5 @@
 import { useMemo, useState } from 'react';
+import { Link } from 'react-router';
 import { formatBytes } from '../lib/format';
 import { IconChevronDown, IconChevronRight, IconDownload, IconFile } from './icons';
 
@@ -31,11 +32,21 @@ function buildTree(files: TreeFile[]): Map<string, Node> {
   return root;
 }
 
-function FileRow({ file, href }: { file: TreeFile; href: string }) {
+function FileRow({ file, href, viewHref }: { file: TreeFile; href: string; viewHref?: string }) {
+  const name = file.path.split('/').pop();
   return (
     <div className="group flex h-8 items-center gap-2 rounded-lg pl-10 pr-2 hover:bg-panel-2/70">
       <IconFile size={14} className="shrink-0 text-ink-3" />
-      <span className="flex-1 truncate font-mono text-[12px] text-ink">{file.path.split('/').pop()}</span>
+      {viewHref ? (
+        <Link
+          to={viewHref}
+          className="flex-1 truncate font-mono text-[12px] text-ink decoration-line-2 underline-offset-2 hover:text-accent hover:underline"
+        >
+          {name}
+        </Link>
+      ) : (
+        <span className="flex-1 truncate font-mono text-[12px] text-ink">{name}</span>
+      )}
       <span className="font-mono text-[11px] text-ink-3 tnum">{formatBytes(file.size)}</span>
       <a
         href={href}
@@ -54,12 +65,14 @@ function DirNode({
   children,
   depth,
   hrefFor,
+  viewHrefFor,
   defaultOpen,
 }: {
   name: string;
   children: Map<string, Node>;
   depth: number;
   hrefFor: (f: TreeFile) => string;
+  viewHrefFor?: (f: TreeFile) => string;
   defaultOpen: boolean;
 }) {
   const [open, setOpen] = useState(defaultOpen);
@@ -92,7 +105,7 @@ function DirNode({
             'file' in node ? (
               <div key={childName} style={{ paddingLeft: 0 }}>
                 <div style={{ paddingLeft: `${depth * 20}px` }}>
-                  <FileRow file={node.file} href={hrefFor(node.file)} />
+                  <FileRow file={node.file} href={hrefFor(node.file)} viewHref={viewHrefFor?.(node.file)} />
                 </div>
               </div>
             ) : (
@@ -102,6 +115,7 @@ function DirNode({
                 children={node.children}
                 depth={depth + 1}
                 hrefFor={hrefFor}
+                viewHrefFor={viewHrefFor}
                 defaultOpen={defaultOpen}
               />
             ),
@@ -111,7 +125,15 @@ function DirNode({
   );
 }
 
-export function FileTree({ files, hrefFor }: { files: TreeFile[]; hrefFor: (f: TreeFile) => string }) {
+export function FileTree({
+  files,
+  hrefFor,
+  viewHrefFor,
+}: {
+  files: TreeFile[];
+  hrefFor: (f: TreeFile) => string;
+  viewHrefFor?: (f: TreeFile) => string;
+}) {
   const tree = useMemo(() => buildTree(files), [files]);
   const defaultOpen = files.length <= 40;
   const entries = useMemo(
@@ -128,9 +150,17 @@ export function FileTree({ files, hrefFor }: { files: TreeFile[]; hrefFor: (f: T
     <div className="select-none">
       {entries.map(([name, node]) =>
         'file' in node ? (
-          <FileRow key={name} file={node.file} href={hrefFor(node.file)} />
+          <FileRow key={name} file={node.file} href={hrefFor(node.file)} viewHref={viewHrefFor?.(node.file)} />
         ) : (
-          <DirNode key={name} name={name} children={node.children} depth={0} hrefFor={hrefFor} defaultOpen={defaultOpen} />
+          <DirNode
+            key={name}
+            name={name}
+            children={node.children}
+            depth={0}
+            hrefFor={hrefFor}
+            viewHrefFor={viewHrefFor}
+            defaultOpen={defaultOpen}
+          />
         ),
       )}
     </div>

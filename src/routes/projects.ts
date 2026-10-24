@@ -1,8 +1,10 @@
 import { Hono, type Context } from 'hono';
 import { audit } from '../lib/audit';
 import { retryExtraction, type ExtractJobRow } from '../lib/extract';
-import { badRequest, conflict, forbidden, notFound } from '../lib/http';
+import { badRequest, conflict, forbidden, notFound, tooLarge } from '../lib/http';
 import { nowMs, randomId, sanitizeFilePath, sha256Hex, slugify } from '../lib/ids';
+import { isTextPath, contentTypeForPath, MAX_TEXT_BLOB_BYTES } from '../lib/mime';
+import { deleteUnreferencedObjects, writeKeyFor } from '../lib/r2refs';
 import { requireAuthAny, requireRole, requireSession, sessionUser, type AppEnv } from '../middleware';
 
 type ProjectRow = {
@@ -281,6 +283,178 @@ projectRoutes.get('/:slug/releases/:version', requireAuthAny(), async (c) => {
   return c.json({ project, release, files: files.results, extractions: jobs.results.map(presentExtraction) });
 });
 
+// --- File viewer / editor -------------------------------------------------------
+// Deploy tokens get the same visibility as the release endpoint above: drafts
+// are invisible to them, published releases are readable.
+
+async function loadReleaseForRead(c: Context<AppEnv>): Promise<{ project: ProjectRow; release: ReleaseRow }> {
+  const auth = c.get('auth');
+  const project = await getProjectBySlug(c.env.DB, c.req.param('slug') ?? '');
+  if (!project) throw notFound('Project not found');
+  if (auth.kind === 'token' && auth.projectId && auth.projectId !== project.id) {
+    throw forbidden('This token is scoped to a different project');
+  }
+  const release = await getRelease(c.env.DB, project.id, c.req.param('version') ?? '');
+  if (!release) throw notFound('Release not found');
+  if (release.status === 'draft' && auth.kind === 'token') throw notFound('Release not found');
+  return { project, release };
+}
+
+/** File content for the viewer: text inline, everything else as metadata. */
+projectRoutes.get('/:slug/releases/:version/blob', requireAuthAny(), async (c) => {
+  const { project, release } = await loadReleaseForRead(c);
+  const path = sanitizeFilePath(c.req.query('path') ?? '');
+  if (!path) throw badRequest('A valid file path is required');
+  const file = await c.env.DB
+    .prepare('SELECT id, path, r2_key, size, digest FROM release_files WHERE release_id = ? AND path = ?')
+    .bind(release.id, path)
+    .first<{ id: string; path: string; r2_key: string; size: number; digest: string | null }>();
+  if (!file) throw notFound('File not found in this release');
+  const contentType = contentTypeForPath(path);
+  const meta = { path, size: file.size, digest: file.digest, contentType };
+  if (isTextPath(path)) {
+    if (file.size > MAX_TEXT_BLOB_BYTES) {
+      return c.json({ kind: 'text', ...meta, content: null, truncated: true });
+    }
+    const obj = await c.env.BUCKET.get(file.r2_key);
+    if (!obj) throw notFound('Stored object is missing; contact an admin');
+    try {
+      const content = new TextDecoder('utf-8', { fatal: true, ignoreBOM: false }).decode(await obj.arrayBuffer());
+      return c.json({ kind: 'text', ...meta, content, truncated: false });
+    } catch {
+      // Binary bytes behind a text extension — report as binary below.
+    }
+  }
+  return c.json({
+    kind: 'binary',
+    ...meta,
+    downloadUrl: `/dl/${project.slug}/v/${release.version}?path=${encodeURIComponent(path)}`,
+  });
+});
+
+/**
+ * Fork a release into a new draft: file rows are cloned and the source
+ * release's R2 objects are shared (no byte copying). An optional edited file
+ * is written into the fork's own namespace. Published releases stay immutable;
+ * this is how the editor saves changes to one.
+ */
+projectRoutes.post('/:slug/releases/:version/fork', requireRole('admin', 'uploader'), async (c) => {
+  const project = await getProjectBySlug(c.env.DB, c.req.param('slug') ?? '');
+  if (!project) throw notFound('Project not found');
+  const release = await getRelease(c.env.DB, project.id, c.req.param('version'));
+  if (!release) throw notFound('Release not found');
+  const body = await c.req.json<Record<string, unknown>>().catch(() => null);
+  const { version, title, notes, path, content } = (body ?? {}) as {
+    version?: string;
+    title?: string;
+    notes?: string;
+    path?: string;
+    content?: string;
+  };
+  if (!version) throw badRequest('A version is required');
+  const normalized = normalizeVersion(version);
+  if (!VERSION_RE.test(normalized)) {
+    throw badRequest('Version must look like 1.2.3 or 1.2.3-beta (max four number groups)');
+  }
+  if (await getRelease(c.env.DB, project.id, normalized)) {
+    throw conflict(`Version ${normalized} already exists in this project`);
+  }
+  let editPath: string | null = null;
+  let editBytes: Uint8Array | null = null;
+  if (path !== undefined || content !== undefined) {
+    if (typeof content !== 'string') throw badRequest('content must be a string when editing a file');
+    editPath = sanitizeFilePath(path ?? '');
+    if (!editPath) throw badRequest('Invalid file path');
+    editBytes = new TextEncoder().encode(content);
+    if (editBytes.byteLength > MAX_TEXT_BLOB_BYTES) throw tooLarge('Edited files are capped at 1 MB');
+  }
+
+  const id = randomId(9);
+  const now = nowMs();
+  await c.env.DB
+    .prepare('INSERT INTO releases (id, project_id, version, title, notes, status, created_by, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)')
+    .bind(id, project.id, normalized, (title ?? '').slice(0, 200), (notes ?? '').slice(0, 20000), 'draft', sessionUser(c).id, now)
+    .run();
+  const clone = await c.env.DB
+    .prepare(
+      `INSERT INTO release_files (id, release_id, path, r2_key, size, content_type, part_digests, digest, download_count, created_at, extract_job_id)
+       SELECT lower(hex(randomblob(12))), ?, path, r2_key, size, content_type, part_digests, digest, 0, ?, NULL
+       FROM release_files WHERE release_id = ?`,
+    )
+    .bind(id, now, release.id)
+    .run();
+  if (editPath && editBytes) {
+    const r2Key = await writeKeyFor(c.env.DB, project.id, id, editPath);
+    await c.env.BUCKET.put(r2Key, editBytes, { httpMetadata: { contentType: contentTypeForPath(editPath) } });
+    const digest = await sha256Hex(editBytes);
+    await c.env.DB
+      .prepare(
+        `INSERT INTO release_files (id, release_id, path, r2_key, size, content_type, digest, part_digests, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, '[]', ?)
+         ON CONFLICT(release_id, path) DO UPDATE SET
+           r2_key = excluded.r2_key, size = excluded.size, content_type = excluded.content_type,
+           digest = excluded.digest, part_digests = excluded.part_digests, created_at = excluded.created_at`,
+      )
+      .bind(randomId(12), id, editPath, r2Key, editBytes.byteLength, contentTypeForPath(editPath), digest, now)
+      .run();
+  }
+  await c.env.DB.prepare('UPDATE projects SET updated_at = ? WHERE id = ?').bind(nowMs(), project.id).run();
+  await audit(c.env.DB, sessionUser(c).email, 'release.fork', `project:${project.slug}/v${normalized}`, {
+    from: release.version,
+    edited: editPath,
+    filesCloned: clone.meta.changes ?? 0,
+  });
+  return c.json({ release: { id, version: normalized, status: 'draft' }, filesCloned: clone.meta.changes ?? 0 }, 201);
+});
+
+/** Save edited text into a draft release in place. Published releases reject. */
+projectRoutes.put('/:slug/releases/:version/files/content', requireRole('admin', 'uploader'), async (c) => {
+  const project = await getProjectBySlug(c.env.DB, c.req.param('slug') ?? '');
+  if (!project) throw notFound('Project not found');
+  const release = await getRelease(c.env.DB, project.id, c.req.param('version'));
+  if (!release) throw notFound('Release not found');
+  if (release.status !== 'draft') {
+    throw conflict('Published releases are immutable — save this edit into a new draft version');
+  }
+  const path = sanitizeFilePath(c.req.query('path') ?? '');
+  if (!path) throw badRequest('A valid file path is required');
+  const declared = Number(c.req.header('content-length') ?? '0');
+  if (declared > MAX_TEXT_BLOB_BYTES) throw tooLarge('Edited files are capped at 1 MB');
+  const bytes = new Uint8Array(await c.req.arrayBuffer());
+  if (bytes.byteLength > MAX_TEXT_BLOB_BYTES) throw tooLarge('Edited files are capped at 1 MB');
+
+  const existing = await c.env.DB
+    .prepare('SELECT id, r2_key FROM release_files WHERE release_id = ? AND path = ?')
+    .bind(release.id, path)
+    .first<{ id: string; r2_key: string }>();
+  const r2Key = await writeKeyFor(c.env.DB, project.id, release.id, path, existing?.id ?? undefined);
+  await c.env.BUCKET.put(r2Key, bytes, { httpMetadata: { contentType: contentTypeForPath(path) } });
+  const digest = await sha256Hex(bytes);
+  const now = nowMs();
+  if (existing) {
+    await c.env.DB
+      .prepare('UPDATE release_files SET r2_key = ?, size = ?, content_type = ?, digest = ?, part_digests = ?, created_at = ? WHERE id = ?')
+      .bind(r2Key, bytes.byteLength, contentTypeForPath(path), digest, '[]', now, existing.id)
+      .run();
+    // The old object may have been a release-private alt key a previous edit
+    // created; drop it if nothing references it anymore.
+    c.executionCtx.waitUntil(deleteUnreferencedObjects(c.env.DB, c.env.BUCKET, [existing.r2_key]));
+  } else {
+    await c.env.DB
+      .prepare(
+        "INSERT INTO release_files (id, release_id, path, r2_key, size, content_type, digest, part_digests, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, '[]', ?)",
+      )
+      .bind(randomId(12), release.id, path, r2Key, bytes.byteLength, contentTypeForPath(path), digest, now)
+      .run();
+  }
+  await c.env.DB.prepare('UPDATE projects SET updated_at = ? WHERE id = ?').bind(nowMs(), project.id).run();
+  await audit(c.env.DB, sessionUser(c).email, 'file.edit', `project:${project.slug}/v${release.version}/${path}`, {
+    size: bytes.byteLength,
+    digest,
+  });
+  return c.json({ ok: true, size: bytes.byteLength, digest });
+});
+
 projectRoutes.patch('/:slug/releases/:version', requireRole('admin', 'uploader'), async (c) => {
   const project = await getProjectBySlug(c.env.DB, c.req.param('slug') ?? '');
   if (!project) throw notFound('Project not found');
@@ -384,15 +558,24 @@ projectRoutes.delete('/:slug/releases/:version', requireRole('admin', 'uploader'
   if (release.status === 'published' && user.role !== 'admin') {
     throw forbidden('Only admins can delete a published release');
   }
+  // Collect the release's object keys, drop the release (its release_files
+  // claims cascade away), then delete only objects no other release
+  // references — forked releases share keys with their source.
+  const rows = await c.env.DB
+    .prepare('SELECT DISTINCT r2_key FROM release_files WHERE release_id = ?')
+    .bind(release.id)
+    .all<{ r2_key: string }>();
+  const keys = rows.results.map((r) => r.r2_key);
+  await c.env.DB.prepare('DELETE FROM releases WHERE id = ?').bind(release.id).run();
+  // Leftover upload-session scratch objects; the no-trailing-slash prefix also
+  // catches release-private ~suffix keys. Shared keys stay reference-protected.
   let cursor: string | undefined;
   do {
-    const listing = await c.env.BUCKET.list({ prefix: `p/${project.id}/r/${release.id}/`, cursor });
-    if (listing.objects.length > 0) {
-      await c.env.BUCKET.delete(listing.objects.map((o) => o.key));
-    }
+    const listing = await c.env.BUCKET.list({ prefix: `p/${project.id}/r/${release.id}`, cursor });
+    for (const o of listing.objects) keys.push(o.key);
     cursor = listing.truncated ? listing.cursor : undefined;
   } while (cursor);
-  await c.env.DB.prepare('DELETE FROM releases WHERE id = ?').bind(release.id).run();
+  await deleteUnreferencedObjects(c.env.DB, c.env.BUCKET, keys);
   await audit(c.env.DB, user.email, 'release.delete', `project:${project.slug}/v${release.version}`);
   return c.json({ ok: true });
 });

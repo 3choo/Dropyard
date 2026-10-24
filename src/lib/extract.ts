@@ -3,6 +3,7 @@ import { Unzip, UnzipInflate, UnzipPassThrough, type UnzipFile } from 'fflate';
 import { nowMs, randomId, sanitizeFilePath } from './ids';
 import { contentTypeForPath } from './mime';
 import { R2S3 } from './r2s3';
+import { deleteUnreferencedObjects } from './r2refs';
 
 const MB = 1024 * 1024;
 /** Server-side part size when streaming a big entry into R2 multipart. */
@@ -70,13 +71,23 @@ function parseVolumes(json: string): ArchiveVolume[] {
   }
 }
 
-/** The release's R2 key prefix, derived from a volume key: p/<project>/r/<release>/. */
-function prefixFromVolume(volume: ArchiveVolume): string {
-  return volume.r2Key.slice(0, volume.r2Key.length - volume.path.length);
-}
-
-function prefixFromKey(r2Key: string, path: string): string {
-  return r2Key.slice(0, r2Key.length - path.length);
+/**
+ * Where extracted entries land. Normally the release's own prefix; forked
+ * drafts share archive keys with the source release, so their output would
+ * otherwise overwrite the source's objects — those get a job-scoped namespace.
+ */
+async function extractionPrefix(
+  db: D1Database,
+  releaseId: string,
+  jobId: string,
+  archiveKey: string,
+): Promise<string> {
+  const rel = await db
+    .prepare('SELECT project_id FROM releases WHERE id = ?')
+    .bind(releaseId)
+    .first<{ project_id: string }>();
+  const own = `p/${rel?.project_id ?? '?'}/r/${releaseId}/`;
+  return archiveKey.startsWith(own) ? own : `${own}${jobId}/`;
 }
 
 async function loadJob(db: D1Database, jobId: string): Promise<ExtractJobRow | null> {
@@ -138,7 +149,7 @@ export async function maybeStartExtraction(
     .bind(jobId, opts.releaseId, kind, JSON.stringify(volumes), 'queued', opts.userId, nowMs())
     .run();
 
-  const prefix = prefixFromKey(opts.r2Key, opts.path);
+  const prefix = await extractionPrefix(env.DB, opts.releaseId, jobId, opts.r2Key);
   if (kind === 'zip') {
     waitUntil(runZipExtraction(env, jobId, opts.releaseId, volumes, prefix).catch(() => {}));
   } else {
@@ -182,7 +193,7 @@ export async function retryExtraction(
   }
 
   const jobId = randomId(12);
-  const prefix = prefixFromVolume(volumes[0]!);
+  const prefix = await extractionPrefix(env.DB, old.release_id, jobId, volumes[0]!.r2Key);
   await env.DB.batch([
     env.DB.prepare('DELETE FROM extract_jobs WHERE id = ?').bind(old.id),
     env.DB.prepare(
@@ -208,13 +219,15 @@ async function completeJob(env: Env, jobId: string): Promise<void> {
   const job = await loadJob(env.DB, jobId);
   if (!job || (job.status !== 'queued' && job.status !== 'running')) return;
   // The user chose to drop the archive once its contents are in the release.
+  const volumeKeys: string[] = [];
   for (const volume of parseVolumes(job.archive_paths)) {
     await env.DB
       .prepare('DELETE FROM release_files WHERE release_id = ? AND path = ?')
       .bind(job.release_id, volume.path)
       .run();
-    await env.BUCKET.delete(volume.r2Key);
+    volumeKeys.push(volume.r2Key);
   }
+  await deleteUnreferencedObjects(env.DB, env.BUCKET, volumeKeys);
   await env.DB
     .prepare("UPDATE extract_jobs SET status = 'done', finished_at = ? WHERE id = ?")
     .bind(nowMs(), jobId)
@@ -531,7 +544,7 @@ export async function handleExtractCallback(env: Env, event: ExtractCallback): P
   if (job.status !== 'queued' && job.status !== 'running') throw new Error('job_closed');
   const volumes = parseVolumes(job.archive_paths);
   if (volumes.length === 0) throw new Error('job_corrupt');
-  const prefix = prefixFromVolume(volumes[0]!);
+  const prefix = await extractionPrefix(env.DB, job.release_id, job.id, volumes[0]!.r2Key);
 
   if (event.type === 'file') {
     const release = await loadDraftReleaseRow(env.DB, job.release_id);

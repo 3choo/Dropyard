@@ -4,6 +4,7 @@ import { maybeStartExtraction } from '../lib/extract';
 import { badRequest, conflict, notFound, tooLarge } from '../lib/http';
 import { nowMs, randomId, sanitizeFilePath, sha256Hex } from '../lib/ids';
 import { MAX_OBJECT_BYTES, R2S3, partSizeFor } from '../lib/r2s3';
+import { deleteUnreferencedObjects, writeKeyFor } from '../lib/r2refs';
 import { requireRole, sessionUser, type AppEnv } from '../middleware';
 
 type UploadRow = {
@@ -80,7 +81,9 @@ uploadRoutes.post('/', async (c) => {
       c.env.DB.prepare('DELETE FROM release_files WHERE id = ?').bind(prevFile.id),
       c.env.DB.prepare('DELETE FROM upload_sessions WHERE file_id = ?').bind(prevFile.id),
     ]);
-    void c.env.BUCKET.delete(prevFile.r2_key);
+    // Forked drafts share keys with their source release — only delete when
+    // no other release still claims the object.
+    c.executionCtx.waitUntil(deleteUnreferencedObjects(c.env.DB, c.env.BUCKET, [prevFile.r2_key]));
   }
   const stale = await c.env.DB
     .prepare("SELECT id, mode, s3_upload_id FROM upload_sessions WHERE release_id = ? AND status = 'active' AND r2_key = ?")
@@ -101,10 +104,12 @@ uploadRoutes.post('/', async (c) => {
     })();
   }
 
-  const r2Key = `p/${release.project_id}/r/${release.id}/${cleanPath}`;
+  const id = randomId(12);
+  // Redirects to a release-private key when the standard key is claimed by
+  // another release (fork clones), so the write can never overwrite shared bytes.
+  const r2Key = await writeKeyFor(c.env.DB, release.project_id, release.id, cleanPath, id);
   const limit = singleUploadLimit(c.env);
   const s3 = new R2S3(c.env);
-  const id = randomId(12);
   const now = nowMs();
 
   if (size <= limit) {

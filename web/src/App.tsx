@@ -1,4 +1,5 @@
 import { Navigate, Route, RouterProvider, createBrowserRouter, useLocation } from 'react-router';
+import { Suspense, lazy } from 'react';
 import { useAuth } from './auth/AuthProvider';
 import { Spinner } from './components/ui';
 import { AppShell } from './components/layout/AppShell';
@@ -8,6 +9,11 @@ import { ReleasePage } from './features/release/ReleasePage';
 import { NewReleasePage } from './features/release/NewReleasePage';
 import { AdminPage } from './features/admin/AdminPage';
 import { InvitePage, LoginPage, SetupPage } from './features/auth/AuthPages';
+
+// The file viewer carries Shiki + CodeMirror — keep them out of the main bundle.
+const FilePage = lazy(() =>
+  import('./features/file/FilePage').then((m) => ({ default: m.FilePage })),
+);
 
 function FullScreenLoad() {
   return (
@@ -60,6 +66,20 @@ const router = createBrowserRouter([
       { path: '/p/:slug', element: <ProjectPage /> },
       { path: '/p/:slug/new-release', element: <NewReleasePage /> },
       { path: '/p/:slug/r/:version', element: <ReleasePage /> },
+      {
+        path: '/p/:slug/r/:version/file/*',
+        element: (
+          <Suspense
+            fallback={
+              <div className="flex h-screen items-center justify-center text-ink-3">
+                <Spinner className="h-5 w-5" />
+              </div>
+            }
+          >
+            <FilePage />
+          </Suspense>
+        ),
+      },
       { path: '/admin', element: <AdminPage /> },
       { path: '*', element: <Navigate to="/" replace /> },
     ],
