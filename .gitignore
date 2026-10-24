@@ -1,0 +1,8 @@
+/.zcode
+/.impeccable
+node_modules/
+web/dist/
+.wrangler/
+.dev.vars
+*.log
+.DS_Store

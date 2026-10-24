@@ -1,0 +1,185 @@
+@import 'tailwindcss';
+@import '@fontsource-variable/geist';
+@import '@fontsource-variable/jetbrains-mono';
+
+@theme {
+  --color-ground: #0c0e11;
+  --color-panel: #12151a;
+  --color-panel-2: #171b21;
+  --color-overlay: #1c2128;
+  --color-line: #232830;
+  --color-line-2: #2e3540;
+  --color-ink: #e8ebef;
+  --color-ink-2: #a6b0bc;
+  --color-ink-3: #7e8896;
+  --color-accent: #c9f24f;
+  --color-accent-hi: #dcff66;
+  --color-accent-dim: #a8c93f;
+  --color-accent-ink: #131608;
+  --color-danger: #ff6b5e;
+  --color-danger-dim: #3a1f1d;
+  --color-warn: #ffc24b;
+  --color-warn-dim: #3a3018;
+  --color-info: #6bb0ff;
+  --color-info-dim: #1b2836;
+
+  --font-sans: 'Geist Variable', ui-sans-serif, system-ui, sans-serif;
+  --font-mono: 'JetBrains Mono Variable', ui-monospace, 'Cascadia Mono', monospace;
+
+  --ease-out-expo: cubic-bezier(0.16, 1, 0.3, 1);
+
+  --shadow-overlay: 0 16px 48px -12px rgb(0 0 0 / 0.55), 0 4px 16px -4px rgb(0 0 0 / 0.4);
+  --shadow-raised: 0 8px 24px -8px rgb(0 0 0 / 0.45);
+}
+
+/* Browser surfaces carry the design: selection, caret, scrollbars, focus. */
+::selection {
+  background: #c9f24f33;
+  color: #f2ffcf;
+}
+
+html {
+  color-scheme: dark;
+}
+
+body {
+  background: var(--color-ground);
+  color: var(--color-ink);
+  font-family: var(--font-sans);
+  font-size: 13px;
+  line-height: 1.5;
+  caret-color: var(--color-accent);
+  -webkit-font-smoothing: antialiased;
+}
+
+* {
+  scrollbar-width: thin;
+  scrollbar-color: #2e3540 transparent;
+}
+*::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+*::-webkit-scrollbar-thumb {
+  background: #2e3540;
+  border-radius: 8px;
+  border: 3px solid var(--color-ground);
+}
+*::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+:focus-visible {
+  outline: 2px solid var(--color-accent);
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+
+input,
+textarea,
+select {
+  caret-color: var(--color-accent);
+}
+
+/* Measured values always sit in mono with tabular figures. */
+.tnum,
+.font-mono {
+  font-variant-numeric: tabular-nums;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}
+
+/* Markdown rendering for release notes. */
+.md {
+  color: var(--color-ink);
+  line-height: 1.65;
+}
+.md h1,
+.md h2,
+.md h3 {
+  font-weight: 600;
+  letter-spacing: -0.02em;
+  margin-top: 1.6em;
+  margin-bottom: 0.5em;
+}
+.md h1 {
+  font-size: 1.25rem;
+}
+.md h2 {
+  font-size: 1.1rem;
+}
+.md h3 {
+  font-size: 1rem;
+}
+.md p,
+.md ul,
+.md ol {
+  margin: 0.6em 0;
+}
+.md ul {
+  list-style: disc;
+  padding-left: 1.4em;
+}
+.md ol {
+  list-style: decimal;
+  padding-left: 1.4em;
+}
+.md code {
+  font-family: var(--font-mono);
+  font-size: 0.85em;
+  background: var(--color-panel-2);
+  border: 1px solid var(--color-line);
+  border-radius: 5px;
+  padding: 0.1em 0.35em;
+}
+.md pre {
+  background: var(--color-panel-2);
+  border: 1px solid var(--color-line);
+  border-radius: 10px;
+  padding: 12px 14px;
+  overflow-x: auto;
+  margin: 0.8em 0;
+}
+.md pre code {
+  background: none;
+  border: none;
+  padding: 0;
+  font-size: 0.82rem;
+}
+.md a {
+  color: var(--color-accent);
+  text-decoration: none;
+  text-underline-offset: 3px;
+}
+.md a:hover {
+  text-decoration: underline;
+}
+.md blockquote {
+  border-left: 1px solid var(--color-line-2);
+  padding-left: 1em;
+  color: var(--color-ink-2);
+  margin: 0.8em 0;
+}
+.md hr {
+  border: none;
+  border-top: 1px solid var(--color-line);
+  margin: 1.4em 0;
+}
+.md table {
+  border-collapse: collapse;
+  margin: 0.8em 0;
+}
+.md th,
+.md td {
+  border: 1px solid var(--color-line);
+  padding: 5px 10px;
+  text-align: left;
+}

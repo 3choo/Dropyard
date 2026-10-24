@@ -1,0 +1,32 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "gitctx",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-10-24",
+  "compatibility_flags": ["nodejs_compat"],
+
+  "assets": {
+    "directory": "./web/dist",
+    "binding": "ASSETS",
+    "not_found_handling": "single-page-application",
+    "run_worker_first": ["/api/*", "/dl/*"]
+  },
+
+  "r2_buckets": [{ "binding": "BUCKET", "bucket_name": "gitctx" }],
+
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "gitctx",
+      "database_id": "00000000-0000-0000-0000-000000000000"
+    }
+  ],
+
+  "vars": {
+    "R2_S3_ACCOUNT_ID": "",
+    "R2_BUCKET_NAME": "gitctx",
+    "MAX_SINGLE_UPLOAD_MB": "90"
+  },
+
+  "observability": { "enabled": true, "head_sampling_rate": 1 }
+}

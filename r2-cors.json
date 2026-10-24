@@ -1,0 +1,13 @@
+{
+  "rules": [
+    {
+      "allowed": {
+        "origins": ["https://gitctx.*.workers.dev", "http://localhost:5173"],
+        "methods": ["GET", "PUT", "HEAD"],
+        "headers": ["x-amz-checksum-sha256", "content-type"]
+      },
+      "exposeHeaders": ["ETag", "x-amz-checksum-sha256", "x-amz-version-id"],
+      "maxAgeSeconds": 3600
+    }
+  ]
+}
