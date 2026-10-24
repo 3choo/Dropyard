@@ -251,7 +251,10 @@ async function runJob(payload) {
       try {
         const { stderr } = await execFileAsync(
           '7zz',
-          ['x', '-y', '-spd', '-scsUTF-8', `-o${out}`, `@${listFile}`, archive],
+          // Archive name must come before the @listfile: 7zz treats the first
+          // non-switch argument as the archive, so the reversed order makes it
+          // try to open the listfile itself (errno=2).
+          ['x', '-y', '-spd', '-scsUTF-8', `-o${out}`, archive, `@${listFile}`],
           { maxBuffer: 16 * MB },
         );
         notes = stderr.split('\n').filter(Boolean).slice(-8).join('\n');

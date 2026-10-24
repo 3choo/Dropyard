@@ -59,5 +59,10 @@
     "MAX_UNPACK_TOTAL_MB": "51200"
   },
 
-  "observability": { "enabled": true, "head_sampling_rate": 1 }
+  "observability": {
+    "enabled": true,
+    "head_sampling_rate": 1,
+    "issues": { "enabled": true },
+    "traces": { "enabled": true }
+  }
 }
