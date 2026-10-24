@@ -29,8 +29,9 @@
 
   // RAR extraction runs in a container (ZIP is stream-extracted in the Worker).
   // Building the image requires Docker; `wrangler deploy` handles the build.
-  // Custom type: 16 GB disk (max 2 GB disk per GiB memory) so a big volume set
-  // fits next to the batched extraction working directory.
+  // standard-3 (2 vCPU / 8 GiB / 16 GB disk) so a big volume set fits next to
+  // the batched extraction working directory. (wrangler 4.x has no
+  // instance_type_custom yet — predefined types only.)
   "containers": [
     {
       "name": "gitctx-extract",
@@ -38,7 +39,7 @@
       "image": "./container/Dockerfile",
       "image_build_context": "./container",
       "max_instances": 5,
-      "instance_type_custom": { "vcpu": 2, "memory_mib": 8192, "disk_mib": 16384 }
+      "instance_type": "standard-3"
     }
   ],
   "durable_objects": {
