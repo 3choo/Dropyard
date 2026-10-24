@@ -55,7 +55,7 @@
     "R2_BUCKET_NAME": "gitctx",
     "MAX_SINGLE_UPLOAD_MB": "90",
     "MAX_UNPACK_FILES": "20000",
-    "MAX_UNPACK_FILE_MB": "5120",
+    "MAX_UNPACK_FILE_MB": "20480",
     "MAX_UNPACK_TOTAL_MB": "51200"
   },
 
