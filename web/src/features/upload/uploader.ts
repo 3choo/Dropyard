@@ -540,7 +540,9 @@ export class UploadEngine {
               err instanceof TypeError
                 ? new Error(
                     `Part ${n} was blocked by the browser (CORS or network). ` +
-                      'The R2 bucket CORS policy must allow this origin for PUT requests.',
+                      'If DevTools shows the failing request as a GET, an extension or proxy is rewriting the part PUT — ' +
+                      'R2 rejects those GETs as SignatureDoesNotMatch and the browser masks it as CORS. ' +
+                      'Otherwise check that the R2 bucket CORS policy allows this origin for PUT requests.',
                   )
                 : err;
             await new Promise((r) => setTimeout(r, 700 * 2 ** attempt));
