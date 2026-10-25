@@ -9,7 +9,8 @@
     "deploy": "npm run build && wrangler deploy",
     "typecheck": "tsc --noEmit -p tsconfig.worker.json && tsc --noEmit -p web/tsconfig.json",
     "test": "vitest run",
-    "cf-typegen": "wrangler types"
+    "cf-typegen": "wrangler types",
+    "migrate:remote": "wrangler d1 migrations apply gitctx --remote"
   },
   "dependencies": {
     "@cloudflare/containers": "^0.3.7",
