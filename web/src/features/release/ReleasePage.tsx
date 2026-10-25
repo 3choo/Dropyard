@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { ApiError, api } from '../../api/client';
@@ -6,7 +6,14 @@ import { useAuth } from '../../auth/AuthProvider';
 import { Button, Chip, CopyButton, EmptyState, Modal, toast } from '../../components/ui';
 import { FileTree } from '../../components/FileTree';
 import { Markdown } from '../../components/Markdown';
-import { IconArrowLeft, IconDownload, IconFile, IconTerminal, IconTrash } from '../../components/icons';
+import {
+  IconArrowLeft,
+  IconChevronDown,
+  IconDownload,
+  IconFile,
+  IconTerminal,
+  IconTrash,
+} from '../../components/icons';
 import { formatBytes, formatDate, shortHash } from '../../lib/format';
 import { pullSnippets } from '../../lib/snippets';
 
@@ -24,6 +31,7 @@ type Release = {
   published_at: number | null;
 };
 type FileRow = { id: string; path: string; size: number; digest: string | null; download_count: number };
+type ExtractPhase = 'download' | 'scan' | 'extract' | 'upload' | 'finish';
 type Extraction = {
   id: string;
   kind: 'zip' | 'rar';
@@ -34,6 +42,22 @@ type Extraction = {
   archives: string[];
   createdAt: number;
   finishedAt: number | null;
+  phase: ExtractPhase | null;
+  detail: string | null;
+  totalFiles: number | null;
+  totalBytes: number | null;
+  archiveBytes: number | null;
+  bytesDone: number | null;
+};
+type ExtractLogLine = { seq: number; line: string; at: number };
+
+const PHASE_LABEL: Record<ExtractPhase | 'queued', string> = {
+  queued: 'Queued',
+  download: 'Fetching volumes',
+  scan: 'Scanning archive',
+  extract: 'Extracting',
+  upload: 'Uploading files',
+  finish: 'Finishing up',
 };
 
 export function ReleasePage() {
@@ -46,12 +70,16 @@ export function ReleasePage() {
   const query = useQuery({
     queryKey: ['release', slug, version],
     queryFn: () =>
-      api<{ project: Project; release: Release; files: FileRow[]; extractions?: Extraction[] }>(
-        `/api/projects/${slug}/releases/${version}`,
-      ),
+      api<{
+        project: Project;
+        release: Release;
+        files: FileRow[];
+        extractions?: Extraction[];
+        extractLogs?: Record<string, ExtractLogLine[]>;
+      }>(`/api/projects/${slug}/releases/${version}`),
     // Keep live while an archive is unpacking so the tree fills in as files land.
     refetchInterval: (q) =>
-      (q.state.data?.extractions ?? []).some((j) => j.status === 'queued' || j.status === 'running') ? 2500 : false,
+      (q.state.data?.extractions ?? []).some((j) => j.status === 'queued' || j.status === 'running') ? 1500 : false,
   });
 
   const retry = useMutation({
@@ -95,6 +123,7 @@ export function ReleasePage() {
 
   const { project, release, files } = query.data;
   const extractions = query.data.extractions ?? [];
+  const extractLogs = query.data.extractLogs ?? {};
   const canUpload = user?.role === 'admin' || user?.role === 'uploader';
   const isAdmin = user?.role === 'admin';
   const dlHref = (path: string) => `/dl/${slug}/v/${version}?path=${encodeURIComponent(path)}`;
@@ -164,42 +193,16 @@ export function ReleasePage() {
 
       {extractions.length > 0 ? (
         <div className="mt-4 space-y-2">
-          {extractions.map((job) => {
-            const archive = job.archives[0]?.split('/').pop() ?? 'archive';
-            const live = job.status === 'queued' || job.status === 'running';
-            return (
-              <div
-                key={job.id}
-                className={`flex items-center gap-3 rounded-xl border px-4 py-2.5 text-[12.5px] ${
-                  job.status === 'failed'
-                    ? 'border-danger/40 bg-danger-dim/40'
-                    : live
-                      ? 'border-line bg-panel'
-                      : 'border-accent/25 bg-panel'
-                }`}
-              >
-                <span
-                  className={`shrink-0 font-mono text-[11px] uppercase ${
-                    job.status === 'failed' ? 'text-danger' : live ? 'text-ink-2' : 'text-accent'
-                  }`}
-                >
-                  {job.status === 'queued' || job.status === 'running'
-                    ? `unpacking ${job.kind}…`
-                    : job.status === 'done'
-                      ? `unpacked ${job.kind}`
-                      : `unpack failed`}
-                </span>
-                <span className="min-w-0 flex-1 truncate font-mono text-ink-2" title={job.error ?? archive}>
-                  {job.status === 'failed' ? job.error : `${archive} → ${job.filesAdded} files · ${formatBytes(job.bytesAdded)}`}
-                </span>
-                {job.status === 'failed' && canUpload && release.status === 'draft' ? (
-                  <Button variant="secondary" className="h-7" loading={retry.isPending && retry.variables === job.id} onClick={() => retry.mutate(job.id)}>
-                    Retry
-                  </Button>
-                ) : null}
-              </div>
-            );
-          })}
+          {extractions.map((job) => (
+            <ExtractionJobCard
+              key={job.id}
+              job={job}
+              logs={extractLogs[job.id] ?? []}
+              canRetry={canUpload && release.status === 'draft'}
+              retrying={retry.isPending && retry.variables === job.id}
+              onRetry={() => retry.mutate(job.id)}
+            />
+          ))}
         </div>
       ) : null}
 
@@ -230,6 +233,180 @@ export function ReleasePage() {
       </section>
 
       <SnippetsModal open={snippetsOpen} onClose={() => setSnippetsOpen(false)} base={base} slug={slug} />
+    </div>
+  );
+}
+
+// --- Live unpack status ------------------------------------------------------------
+
+/**
+ * ETA from a sliding window of percent samples (~12 polls ≈ 18s). No ETA until
+ * the rate stabilizes; hidden again when it would be meaningless (>6h).
+ */
+function useEta(pct: number | null): string | null {
+  const [eta, setEta] = useState<string | null>(null);
+  const samples = useRef<Array<{ t: number; pct: number }>>([]);
+  useEffect(() => {
+    if (pct === null || pct < 1 || pct >= 100) {
+      samples.current = [];
+      setEta(null);
+      return;
+    }
+    const s = samples.current;
+    s.push({ t: Date.now(), pct });
+    if (s.length > 12) s.shift();
+    if (s.length < 3) return;
+    const first = s[0]!;
+    const last = s[s.length - 1]!;
+    const rate = (last.pct - first.pct) / Math.max(1, last.t - first.t); // pct per ms
+    if (rate <= 0) return;
+    const secs = Math.round((100 - pct) / rate / 1000);
+    if (secs < 5) setEta('a few seconds');
+    else if (secs < 60) setEta(`${secs}s`);
+    else if (secs < 3600) setEta(`${Math.floor(secs / 60)}m ${String(secs % 60).padStart(2, '0')}s`);
+    else if (secs <= 6 * 3600) setEta(`${Math.floor(secs / 3600)}h ${String(Math.floor((secs % 3600) / 60)).padStart(2, '0')}m`);
+    else setEta(null);
+  }, [pct]);
+  return eta;
+}
+
+function formatClock(ts: number): string {
+  return new Date(ts).toLocaleTimeString(undefined, { hour12: false });
+}
+
+/** Terminal-style console with the job's ring buffer of lines; pinned to the tail. */
+function ExtractConsole({ lines }: { lines: ExtractLogLine[] }) {
+  const box = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    const el = box.current;
+    if (el) el.scrollTop = el.scrollHeight;
+  }, [lines.length]);
+  return (
+    <div
+      ref={box}
+      className="mt-2 max-h-56 overflow-y-auto rounded-lg border border-line bg-ground px-3 py-2 font-mono text-[11px] leading-[1.7]"
+    >
+      {lines.map((l) => (
+        <div key={l.seq} className="flex gap-2.5">
+          <span className="shrink-0 tnum text-ink-3/70">{formatClock(l.at)}</span>
+          <span className="min-w-0 break-all text-ink-2/90">{l.line}</span>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function ExtractionJobCard({
+  job,
+  logs,
+  canRetry,
+  retrying,
+  onRetry,
+}: {
+  job: Extraction;
+  logs: ExtractLogLine[];
+  canRetry: boolean;
+  retrying: boolean;
+  onRetry: () => void;
+}) {
+  const [consoleOpen, setConsoleOpen] = useState(false);
+  const live = job.status === 'queued' || job.status === 'running';
+
+  // The uploaded-payload fraction is the truth once the listing totals land
+  // (rar); before that — and always for zip — it's bytes read/downloaded of
+  // the archive itself.
+  const pct =
+    job.totalBytes && job.totalBytes > 0
+      ? Math.min(100, (job.bytesAdded / job.totalBytes) * 100)
+      : job.archiveBytes && job.archiveBytes > 0 && job.bytesDone !== null
+        ? Math.min(100, (job.bytesDone / job.archiveBytes) * 100)
+        : null;
+  const eta = useEta(live ? pct : null);
+
+  const archive = job.archives[0]?.split('/').pop() ?? 'archive';
+  const phaseKey = job.phase ?? 'queued';
+  const counts =
+    job.totalFiles && job.totalFiles > 0
+      ? ` · ${job.filesAdded.toLocaleString()}/${job.totalFiles.toLocaleString()} files`
+      : '';
+  const byteCounts =
+    job.totalBytes && job.totalBytes > 0
+      ? ` · ${formatBytes(job.bytesAdded)} / ${formatBytes(job.totalBytes)}`
+      : job.archiveBytes && job.archiveBytes > 0 && job.bytesDone !== null
+        ? ` · ${formatBytes(job.bytesDone)} / ${formatBytes(job.archiveBytes)}`
+        : '';
+
+  if (!live) {
+    const failed = job.status === 'failed';
+    return (
+      <div
+        className={`rounded-xl border px-4 py-2.5 text-[12.5px] ${
+          failed ? 'border-danger/40 bg-danger-dim/40' : 'border-accent/25 bg-panel'
+        }`}
+      >
+        <div className="flex items-center gap-3">
+          <span className={`shrink-0 font-mono text-[11px] uppercase ${failed ? 'text-danger' : 'text-accent'}`}>
+            {failed ? 'unpack failed' : `unpacked ${job.kind}`}
+          </span>
+          <span className="min-w-0 flex-1 truncate font-mono text-ink-2" title={job.error ?? archive}>
+            {failed ? job.error : `${archive} → ${job.filesAdded} files · ${formatBytes(job.bytesAdded)}`}
+          </span>
+          {failed && canRetry ? (
+            <Button variant="secondary" className="h-7" loading={retrying} onClick={onRetry}>
+              Retry
+            </Button>
+          ) : null}
+          {logs.length > 0 ? (
+            <button
+              onClick={() => setConsoleOpen((v) => !v)}
+              className="flex shrink-0 items-center gap-1 font-mono text-[11px] text-ink-3 transition-colors hover:text-ink-2"
+            >
+              console
+              <IconChevronDown size={12} className={`transition-transform ${consoleOpen ? 'rotate-180' : ''}`} />
+            </button>
+          ) : null}
+        </div>
+        {consoleOpen && logs.length > 0 ? <ExtractConsole lines={logs} /> : null}
+      </div>
+    );
+  }
+
+  return (
+    <div className="rounded-xl border border-line bg-panel px-4 py-3 text-[12.5px]">
+      <div className="flex items-center gap-3">
+        <span className="shrink-0 font-mono text-[11px] uppercase text-ink-2">unpacking {job.kind}…</span>
+        <div className="h-1.5 min-w-16 flex-1 overflow-hidden rounded-full bg-panel-2">
+          {pct !== null ? (
+            <div
+              className="h-full rounded-full bg-accent transition-[width] duration-500 ease-out"
+              style={{ width: `${pct}%` }}
+            />
+          ) : (
+            <div className="h-full w-full animate-pulse rounded-full bg-accent/40" />
+          )}
+        </div>
+        <span className="shrink-0 font-mono text-[11px] tnum text-ink-2">{pct !== null ? `${Math.floor(pct)}%` : '…'}</span>
+        {eta ? <span className="shrink-0 font-mono text-[11px] tnum text-ink-3">~{eta} left</span> : null}
+      </div>
+      <div className="mt-1.5 flex items-center gap-2 font-mono text-[11px] text-ink-3">
+        <span className="min-w-0 flex-1 truncate">
+          {PHASE_LABEL[phaseKey]}
+          {job.detail && phaseKey !== 'queued' ? ` · ${job.detail}` : ''}
+          {counts}
+          {byteCounts}
+        </span>
+        {logs.length > 0 ? (
+          <button
+            onClick={() => setConsoleOpen((v) => !v)}
+            className="flex shrink-0 items-center gap-1 text-ink-3 transition-colors hover:text-ink-2"
+          >
+            <IconTerminal size={12} />
+            console
+            <IconChevronDown size={12} className={`transition-transform ${consoleOpen ? 'rotate-180' : ''}`} />
+          </button>
+        ) : null}
+      </div>
+      {consoleOpen && logs.length > 0 ? <ExtractConsole lines={logs} /> : null}
     </div>
   );
 }

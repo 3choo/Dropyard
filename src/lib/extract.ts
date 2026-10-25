@@ -23,7 +23,25 @@ export type ExtractJobRow = {
   created_by: string | null;
   created_at: number;
   finished_at: number | null;
+  phase: ExtractPhase | null;
+  detail: string | null;
+  total_files: number | null;
+  total_bytes: number | null;
+  archive_bytes: number | null;
+  bytes_done: number;
 };
+
+/** Coarse job phases, mirrored by the extraction container. */
+export type ExtractPhase = 'download' | 'scan' | 'extract' | 'upload' | 'finish';
+
+const PHASES: ExtractPhase[] = ['download', 'scan', 'extract', 'upload', 'finish'];
+
+export function isExtractPhase(v: unknown): v is ExtractPhase {
+  return typeof v === 'string' && PHASES.includes(v as ExtractPhase);
+}
+
+/** Console lines kept per job; the writer trims anything older. */
+const LOG_CAP = 400;
 
 type UnpackCaps = { files: number; fileBytes: number; totalBytes: number };
 
@@ -195,6 +213,7 @@ export async function retryExtraction(
   const jobId = randomId(12);
   const prefix = await extractionPrefix(env.DB, old.release_id, jobId, volumes[0]!.r2Key);
   await env.DB.batch([
+    env.DB.prepare('DELETE FROM extract_log WHERE job_id = ?').bind(old.id),
     env.DB.prepare('DELETE FROM extract_jobs WHERE id = ?').bind(old.id),
     env.DB.prepare(
       'INSERT INTO extract_jobs (id, release_id, kind, archive_paths, status, created_by, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)',
@@ -211,6 +230,52 @@ export async function retryExtraction(
 
 // --- Job lifecycle ---------------------------------------------------------------
 
+function fmtDur(ms: number): string {
+  const s = Math.max(1, Math.round(ms / 1000));
+  if (s < 90) return `${s}s`;
+  const m = Math.floor(s / 60);
+  if (m < 90) return `${m}m ${String(s % 60).padStart(2, '0')}s`;
+  return `${Math.floor(m / 60)}h ${String(m % 60).padStart(2, '0')}m`;
+}
+
+function fmtBytes(n: number): string {
+  const units = ['B', 'KiB', 'MiB', 'GiB', 'TiB'];
+  let v = n;
+  let u = 0;
+  while (v >= 1024 && u < units.length - 1) {
+    v /= 1024;
+    u++;
+  }
+  return `${v >= 100 || u === 0 ? Math.round(v) : v.toFixed(1)} ${units[u]}`;
+}
+
+/**
+ * Append console lines to a job's ring buffer. Lines are trimmed and capped at
+ * LOG_CAP per job; seq assignment is single-writer per job in practice (the
+ * container posts sequentially, the zip path runs one loop).
+ */
+export async function appendJobLog(env: Env, jobId: string, lines: string[]): Promise<void> {
+  const clean = lines
+    .map((l) => String(l ?? '').trimEnd())
+    .filter((l) => l.length > 0)
+    .map((l) => l.slice(0, 500));
+  if (clean.length === 0) return;
+  const max = await env.DB
+    .prepare('SELECT COALESCE(MAX(seq), 0) AS m FROM extract_log WHERE job_id = ?')
+    .bind(jobId)
+    .first<{ m: number }>();
+  let seq = max?.m ?? 0;
+  const now = nowMs();
+  const stmts = clean.map((line, i) =>
+    env.DB.prepare('INSERT INTO extract_log (job_id, seq, line, at) VALUES (?, ?, ?, ?)').bind(jobId, seq + 1 + i, line, now),
+  );
+  seq += clean.length;
+  if (seq > LOG_CAP) {
+    stmts.push(env.DB.prepare('DELETE FROM extract_log WHERE job_id = ? AND seq <= ?').bind(jobId, seq - LOG_CAP));
+  }
+  await env.DB.batch(stmts);
+}
+
 async function markRunning(db: D1Database, jobId: string): Promise<void> {
   await db.prepare("UPDATE extract_jobs SET status = 'running' WHERE id = ? AND status = 'queued'").bind(jobId).run();
 }
@@ -218,6 +283,9 @@ async function markRunning(db: D1Database, jobId: string): Promise<void> {
 async function completeJob(env: Env, jobId: string): Promise<void> {
   const job = await loadJob(env.DB, jobId);
   if (!job || (job.status !== 'queued' && job.status !== 'running')) return;
+  await appendJobLog(env, jobId, [
+    `done in ${fmtDur(nowMs() - job.created_at)} · ${job.files_added} files · ${fmtBytes(job.bytes_added)}`,
+  ]);
   // The user chose to drop the archive once its contents are in the release.
   const volumeKeys: string[] = [];
   for (const volume of parseVolumes(job.archive_paths)) {
@@ -229,7 +297,7 @@ async function completeJob(env: Env, jobId: string): Promise<void> {
   }
   await deleteUnreferencedObjects(env.DB, env.BUCKET, volumeKeys);
   await env.DB
-    .prepare("UPDATE extract_jobs SET status = 'done', finished_at = ? WHERE id = ?")
+    .prepare("UPDATE extract_jobs SET status = 'done', phase = 'finish', finished_at = ? WHERE id = ?")
     .bind(nowMs(), jobId)
     .run();
 }
@@ -238,6 +306,7 @@ async function completeJob(env: Env, jobId: string): Promise<void> {
 export async function failJob(env: Env, jobId: string, message: string): Promise<void> {
   const job = await loadJob(env.DB, jobId);
   if (!job || (job.status !== 'queued' && job.status !== 'running')) return;
+  await appendJobLog(env, jobId, [`failed after ${fmtDur(nowMs() - job.created_at)}: ${message.slice(0, 300)}`]);
   await cleanupExtractedFiles(env, jobId);
   await env.DB
     .prepare("UPDATE extract_jobs SET status = 'failed', error = ?, finished_at = ? WHERE id = ?")
@@ -334,9 +403,35 @@ async function runZipExtraction(
   let liveUploadId: string | null = null;
   let liveKey: string | null = null;
 
+  // Live progress: % of the archive stream consumed; totals are unknown until
+  // the central directory at the end, so bytes read is the only honest numerator.
+  const progress = { bytesRead: 0, entries: 0, lastUpdateBytes: 0, lastLogBytes: 0 };
+  const maybeReportProgress = async (): Promise<void> => {
+    if (progress.bytesRead - progress.lastUpdateBytes < 16 * MB) return;
+    progress.lastUpdateBytes = progress.bytesRead;
+    const log =
+      progress.bytesRead - progress.lastLogBytes >= 128 * MB
+        ? `read ${fmtBytes(progress.bytesRead)} of ${fmtBytes(archiveSize)} · ${progress.entries} files`
+        : null;
+    if (log) progress.lastLogBytes = progress.bytesRead;
+    await env.DB
+      .prepare('UPDATE extract_jobs SET bytes_done = ?, phase = ? WHERE id = ?')
+      .bind(progress.bytesRead, 'extract', jobId)
+      .run();
+    if (log) await appendJobLog(env, jobId, [log]);
+  };
+
+  let archiveSize = 0;
   try {
     const obj = await env.BUCKET.get(archive.r2Key);
     if (!obj) throw new Error('The zip object is no longer in storage');
+    archiveSize = obj.size;
+    const base = archive.path.split('/').pop() ?? archive.path;
+    await env.DB
+      .prepare('UPDATE extract_jobs SET phase = ?, detail = ?, archive_bytes = ?, bytes_done = 0 WHERE id = ?')
+      .bind('extract', base, archiveSize, jobId)
+      .run();
+    await appendJobLog(env, jobId, [`unzipping ${base} (${fmtBytes(archiveSize)})`]);
 
     let chain: Promise<void> = Promise.resolve();
     let streamError: unknown = null;
@@ -367,9 +462,11 @@ async function runZipExtraction(
     for (;;) {
       const { done, value } = await reader.read();
       if (done) break;
+      progress.bytesRead += value.length;
       unzipper.push(value, false);
       await chain;
       if (streamError) throw streamError;
+      await maybeReportProgress();
     }
     unzipper.push(new Uint8Array(0), true);
     await chain;
@@ -413,6 +510,7 @@ async function runZipExtraction(
           // Entire entry fit in the buffer: one plain put.
           await env.BUCKET.put(destKey, chunk, { httpMetadata: { contentType } });
           await insertExtractedFile(env, jobId, releaseId, destKey, clean, chunk.length, contentType, caps);
+          progress.entries += 1;
           return;
         }
         if (chunk.length > 0) {
@@ -429,6 +527,7 @@ async function runZipExtraction(
           liveUploadId = null;
           liveKey = null;
           await insertExtractedFile(env, jobId, releaseId, destKey, clean, entryBytes, contentType, caps);
+          progress.entries += 1;
         }
       };
 
@@ -452,6 +551,7 @@ async function runZipExtraction(
           if (entryBytes === 0) {
             await env.BUCKET.put(destKey, new Uint8Array(0), { httpMetadata: { contentType } });
             await insertExtractedFile(env, jobId, releaseId, destKey, clean, 0, contentType, caps);
+            progress.entries += 1;
             return;
           }
           await flush(true);
@@ -482,6 +582,13 @@ async function runRarExtraction(
         'RAR extraction needs the R2 S3 credentials (R2_ACCESS_KEY_ID / R2_SECRET_ACCESS_KEY) so the container can read and write storage',
       );
     }
+    await env.DB
+      .prepare("UPDATE extract_jobs SET phase = 'download', detail = 'starting container' WHERE id = ?")
+      .bind(jobId)
+      .run();
+    await appendJobLog(env, jobId, [
+      `unraring ${volumes.map((v) => v.path.split('/').pop()).join(', ')} via extraction container`,
+    ]);
 
     const runner = getContainer(env.EXTRACT_RUNNER, jobId);
     await runner.start();
@@ -535,8 +642,114 @@ export class ExtractRunner extends Container {
 
 export type ExtractCallback =
   | { jobId: string; type: 'file'; path: string; size: number; contentType?: string }
+  | { jobId: string; type: 'files'; files: { path: string; size: number; contentType?: string }[] }
   | { jobId: string; type: 'done' }
-  | { jobId: string; type: 'failed'; error: string };
+  | { jobId: string; type: 'failed'; error: string }
+  | {
+      jobId: string;
+      type: 'stage';
+      phase: ExtractPhase;
+      detail?: string;
+      /** One console line to append atomically with the stage change. */
+      log?: string;
+      totalFiles?: number;
+      totalBytes?: number;
+      archiveBytes?: number;
+      bytesDone?: number;
+    }
+  | { jobId: string; type: 'log'; lines: string[] };
+
+/** Non-negative integer or undefined — the only numbers a stage event may carry. */
+function optCount(v: unknown): number | undefined {
+  return typeof v === 'number' && Number.isInteger(v) && v >= 0 ? v : undefined;
+}
+
+async function applyStage(
+  env: Env,
+  jobId: string,
+  ev: ExtractCallback & { type: 'stage' },
+): Promise<void> {
+  await env.DB
+    .prepare(
+      `UPDATE extract_jobs SET
+         phase = ?,
+         detail = COALESCE(?, detail),
+         total_files = COALESCE(?, total_files),
+         total_bytes = COALESCE(?, total_bytes),
+         archive_bytes = COALESCE(?, archive_bytes),
+         bytes_done = COALESCE(?, bytes_done)
+       WHERE id = ? AND status IN ('queued', 'running')`,
+    )
+    .bind(
+      ev.phase,
+      ev.detail ?? null,
+      optCount(ev.totalFiles) ?? null,
+      optCount(ev.totalBytes) ?? null,
+      optCount(ev.archiveBytes) ?? null,
+      optCount(ev.bytesDone) ?? null,
+      jobId,
+    )
+    .run();
+}
+
+/** Max entries accepted in one 'files' callback — one D1 batch per chunk. */
+const MAX_CALLBACK_FILES = 1000;
+
+/**
+ * Insert a chunk of extracted files as a single D1 batch. The container has
+ * already enforced every cap against the archive listing before extracting,
+ * so this only re-checks the chunk against the job's running totals — no
+ * COUNT/SUM scan per file (that was O(n²) on archives with tens of thousands
+ * of entries).
+ */
+async function insertExtractedFiles(
+  env: Env,
+  job: ExtractJobRow,
+  prefix: string,
+  files: { path: string; size: number; contentType?: string }[],
+): Promise<void> {
+  const release = await loadDraftReleaseRow(env.DB, job.release_id);
+  if (!release || release.status !== 'draft') throw new Error('release_not_draft');
+  if (!Array.isArray(files) || files.length === 0 || files.length > MAX_CALLBACK_FILES) throw new Error('bad_files');
+  const caps = unpackCaps(env);
+  if (job.files_added + files.length > caps.files) {
+    throw new Error(`Archive exceeds the ${caps.files} file unpack limit (MAX_UNPACK_FILES)`);
+  }
+  const now = nowMs();
+  // Dedupe by cleaned path, last wins, so same-chunk duplicates collapse.
+  const byPath = new Map<string, { size: number; contentType: string }>();
+  let bytes = 0;
+  for (const f of files) {
+    const clean = sanitizeFilePath(f.path);
+    if (!clean) throw new Error('bad_path');
+    if (typeof f.size !== 'number' || f.size < 0 || !Number.isInteger(f.size)) throw new Error('bad_size');
+    if (f.size > caps.fileBytes) {
+      throw new Error(`File ${clean} exceeds the per-file unpack limit (MAX_UNPACK_FILE_MB)`);
+    }
+    bytes += f.size;
+    byPath.set(clean, { size: f.size, contentType: f.contentType || contentTypeForPath(clean) });
+  }
+  if (job.bytes_added + bytes > caps.totalBytes) {
+    throw new Error('Archive exceeds the total unpack size limit (MAX_UNPACK_TOTAL_MB)');
+  }
+  const stmts: D1PreparedStatement[] = [];
+  for (const [clean, f] of byPath) {
+    stmts.push(env.DB.prepare('DELETE FROM release_files WHERE release_id = ? AND path = ?').bind(job.release_id, clean));
+    stmts.push(
+      env.DB
+        .prepare(
+          "INSERT INTO release_files (id, release_id, path, r2_key, size, content_type, part_digests, created_at, extract_job_id) VALUES (?, ?, ?, ?, ?, ?, '[]', ?, ?)",
+        )
+        .bind(randomId(12), job.release_id, clean, prefix + clean, f.size, f.contentType, now, job.id),
+    );
+  }
+  stmts.push(
+    env.DB
+      .prepare('UPDATE extract_jobs SET files_added = files_added + ?, bytes_added = bytes_added + ? WHERE id = ?')
+      .bind(byPath.size, bytes, job.id),
+  );
+  await env.DB.batch(stmts);
+}
 
 export async function handleExtractCallback(env: Env, event: ExtractCallback): Promise<{ ok: true }> {
   const job = await loadJob(env.DB, event.jobId);
@@ -562,6 +775,20 @@ export async function handleExtractCallback(env: Env, event: ExtractCallback): P
       event.contentType || contentTypeForPath(clean),
       unpackCaps(env),
     );
+    return { ok: true };
+  }
+  if (event.type === 'files') {
+    await insertExtractedFiles(env, job, prefix, event.files);
+    return { ok: true };
+  }
+  if (event.type === 'stage') {
+    if (!isExtractPhase(event.phase)) throw new Error('bad_phase');
+    await applyStage(env, job.id, event);
+    if (typeof event.log === 'string' && event.log.length > 0) await appendJobLog(env, job.id, [event.log]);
+    return { ok: true };
+  }
+  if (event.type === 'log') {
+    await appendJobLog(env, job.id, event.lines);
     return { ok: true };
   }
   if (event.type === 'done') {

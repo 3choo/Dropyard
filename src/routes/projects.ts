@@ -64,6 +64,12 @@ function presentExtraction(job: ExtractJobRow) {
     archives,
     createdAt: job.created_at,
     finishedAt: job.finished_at,
+    phase: job.phase,
+    detail: job.detail,
+    totalFiles: job.total_files,
+    totalBytes: job.total_bytes,
+    archiveBytes: job.archive_bytes,
+    bytesDone: job.bytes_done,
   };
 }
 
@@ -280,7 +286,24 @@ projectRoutes.get('/:slug/releases/:version', requireAuthAny(), async (c) => {
     .prepare('SELECT * FROM extract_jobs WHERE release_id = ? ORDER BY created_at DESC')
     .bind(release.id)
     .all<ExtractJobRow>();
-  return c.json({ project, release, files: files.results, extractions: jobs.results.map(presentExtraction) });
+  // Console lines for the jobs worth watching: live ones, plus recent history
+  // (the 7zz trail is the first thing you want after a failed unpack).
+  const logJobs = jobs.results.slice(0, 3);
+  const extractLogs: Record<string, { seq: number; line: string; at: number }[]> = {};
+  for (const job of logJobs) {
+    const lines = await c.env.DB
+      .prepare('SELECT seq, line, at FROM extract_log WHERE job_id = ? ORDER BY seq DESC LIMIT 200')
+      .bind(job.id)
+      .all<{ seq: number; line: string; at: number }>();
+    if (lines.results.length > 0) extractLogs[job.id] = lines.results.reverse();
+  }
+  return c.json({
+    project,
+    release,
+    files: files.results,
+    extractions: jobs.results.map(presentExtraction),
+    extractLogs,
+  });
 });
 
 // --- File viewer / editor -------------------------------------------------------

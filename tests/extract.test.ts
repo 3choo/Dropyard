@@ -175,6 +175,10 @@ describe('zip extraction', () => {
     const job = await waitForExtraction(slug, version);
     expect(job.status).toBe('done');
     expect(job.filesAdded).toBe(2);
+    // Live-status surface: the zip path reports its read position and a
+    // console trail even after the job settles.
+    expect(job.phase).toBe('finish');
+    expect(job.archiveBytes).toBe(zip.length);
 
     const detail = await call(`/api/projects/${slug}/releases/${version}`);
     const paths = detail.body.files.map((f: any) => f.path);
@@ -186,6 +190,11 @@ describe('zip extraction', () => {
     expect(lua.content_type).toBe('text/plain; charset=utf-8');
     const ytd = detail.body.files.find((f: any) => f.path === 'resources/stream/cars.ytd');
     expect(ytd.size).toBe(300_000);
+
+    // Done jobs keep their console lines (start + closing line, at minimum).
+    const logLines: string[] = (detail.body.extractLogs?.[job.id] ?? []).map((l: any) => l.line);
+    expect(logLines.some((l) => l.startsWith('unzipping build.zip'))).toBe(true);
+    expect(logLines.some((l) => l.startsWith('done in'))).toBe(true);
 
     // /dl serves published releases only — publish, then pull the file back.
     const publish = await call(`/api/projects/${slug}/releases/${version}/publish`, { method: 'POST' });
@@ -229,7 +238,117 @@ describe('zip extraction', () => {
     const paths = detail.body.files.map((f: any) => f.path);
     expect(paths).toContain('build.zip'); // archive kept on failure
     expect(detail.body.extractions[0].status).toBe('failed');
+    // Failed jobs keep their console trail — that's where 7zz/unzipper errors land.
+    const failLines: string[] = (detail.body.extractLogs?.[job.id] ?? []).map((l: any) => l.line);
+    expect(failLines.some((l) => l.startsWith('failed after'))).toBe(true);
   }, 30_000);
+});
+
+describe('live progress callbacks', () => {
+  const secret = 'test-extract-secret';
+
+  async function postCallback(payload: unknown, token = secret): Promise<{ res: Response; body: any }> {
+    const res = await worker.fetch(`${ORIGIN}/api/internal/extract`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', authorization: `Bearer ${token}` },
+      body: JSON.stringify(payload),
+    });
+    return { res, body: await res.json().catch(() => null) };
+  }
+
+  async function seedRunningJob(jobId: string, releaseId: string, status = 'running'): Promise<void> {
+    await env.DB
+      .prepare(
+        "INSERT INTO extract_jobs (id, release_id, kind, archive_paths, status, created_at) VALUES (?, ?, 'rar', ?, ?, ?)",
+      )
+      .bind(
+        jobId,
+        releaseId,
+        JSON.stringify([{ path: 'pack.part1.rar', r2Key: 'p/x/r/y/pack.part1.rar' }]),
+        status,
+        Date.now(),
+      )
+      .run();
+  }
+
+  it('persists stage updates and console lines for a live job', async () => {
+    const { slug, version, releaseId } = await makeProjectAndRelease();
+    await seedRunningJob('jprog', releaseId);
+
+    const stage1 = await postCallback({
+      jobId: 'jprog',
+      type: 'stage',
+      phase: 'download',
+      detail: 'pack.part1.rar',
+      archiveBytes: 1000,
+      bytesDone: 400,
+      log: 'downloading 1 volume · 1000 B',
+    });
+    expect(stage1.res.status).toBe(200);
+    const logs = await postCallback({ jobId: 'jprog', type: 'log', lines: ['fetched pack.part1.rar · 1000 B in 2s'] });
+    expect(logs.res.status).toBe(200);
+
+    const detail = await call(`/api/projects/${slug}/releases/${version}`);
+    const job = detail.body.extractions.find((j: any) => j.id === 'jprog');
+    expect(job.phase).toBe('download');
+    expect(job.detail).toBe('pack.part1.rar');
+    expect(job.archiveBytes).toBe(1000);
+    expect(job.bytesDone).toBe(400);
+    expect(detail.body.extractLogs.jprog.map((l: any) => l.line)).toEqual([
+      'downloading 1 volume · 1000 B',
+      'fetched pack.part1.rar · 1000 B in 2s',
+    ]);
+
+    // Totals arrive with the listing stage; earlier counters must survive it.
+    await postCallback({ jobId: 'jprog', type: 'stage', phase: 'extract', detail: 'batch 1/2', totalFiles: 12, totalBytes: 5000 });
+    const detail2 = await call(`/api/projects/${slug}/releases/${version}`);
+    const job2 = detail2.body.extractions.find((j: any) => j.id === 'jprog');
+    expect(job2.phase).toBe('extract');
+    expect(job2.detail).toBe('batch 1/2');
+    expect(job2.totalFiles).toBe(12);
+    expect(job2.totalBytes).toBe(5000);
+    expect(job2.archiveBytes).toBe(1000);
+  });
+
+  it('inserts batched file callbacks as release files', async () => {
+    const { slug, version, releaseId } = await makeProjectAndRelease();
+    await seedRunningJob('jfiles', releaseId);
+    const ok = await postCallback({
+      jobId: 'jfiles',
+      type: 'files',
+      files: [
+        { path: 'a.txt', size: 3 },
+        { path: 'b/lua.txt', size: 5, contentType: 'text/plain; charset=utf-8' },
+      ],
+    });
+    expect(ok.res.status).toBe(200);
+    const detail = await call(`/api/projects/${slug}/releases/${version}`);
+    const paths = detail.body.files.map((f: any) => f.path);
+    expect(paths).toContain('a.txt');
+    expect(paths).toContain('b/lua.txt');
+    const job = detail.body.extractions.find((j: any) => j.id === 'jfiles');
+    expect(job.filesAdded).toBe(2);
+    expect(job.bytesAdded).toBe(8);
+  });
+
+  it('validates stage phases and log batches', async () => {
+    const { releaseId } = await makeProjectAndRelease();
+    await seedRunningJob('jbad', releaseId);
+    expect((await postCallback({ jobId: 'jbad', type: 'stage', phase: 'warp' })).res.status).toBe(400);
+    expect(
+      (await postCallback({ jobId: 'jbad', type: 'log', lines: Array.from({ length: 201 }, (_, i) => `l${i}`) })).res
+        .status,
+    ).toBe(400);
+    expect((await postCallback({ jobId: 'jbad', type: 'log', lines: ['ok', 5] })).res.status).toBe(400);
+    expect((await postCallback({ jobId: 'jbad', type: 'stage', phase: 'upload', bytesDone: -1 })).res.status).toBe(200); // negative counters are dropped, not fatal
+  });
+
+  it('rejects progress callbacks for closed jobs', async () => {
+    const { releaseId } = await makeProjectAndRelease();
+    await seedRunningJob('jdone', releaseId, 'done');
+    const res = await postCallback({ jobId: 'jdone', type: 'stage', phase: 'upload' });
+    expect(res.res.status).toBe(410);
+  });
 });
 
 describe('publish gate and callback auth', () => {
