@@ -128,16 +128,26 @@ PowerShell (Windows / txAdmin):
   -Token gctx_xxx -Slug server-artifacts -Dest C:\fxserver\artifacts
 ```
 
-Linux (needs `curl` + `jq`):
+Linux (bash + `curl` only, nothing to copy). The server hands out the pull
+script with the origin and slug baked in:
 
 ```bash
-BASE_URL=https://gitctx.yourteam.workers.dev \
-TOKEN=gctx_xxx SLUG=server-artifacts DEST=/srv/fxserver/artifacts \
-./gitctx-updater.sh
+curl -fsSL -H "Authorization: Bearer gctx_xxx" \
+  https://gitctx.yourteam.workers.dev/dl/server-artifacts/pull.sh | DEST=/srv/fxserver/resources bash
 ```
 
-Both check a lightweight digest endpoint first — nothing downloads when the
-release hasn't changed, so they're safe in a cron or txAdmin schedule.
+It mirrors the release: only new or changed files are downloaded, files the
+previous release had but this one dropped are deleted, and anything else in
+`DEST` is left alone (state lives in `DEST/.gitctx/`). `FORCE=1` re-downloads
+everything. [`gitctx-updater.sh`](scripts/updater/gitctx-updater.sh) wraps the
+same thing with env vars for cron.
+
+Whole release as one file: `GET /dl/<slug>/latest?format=zip` streams a zip
+(ZIP64, stored) built on the fly from R2; multi-file releases get the zip
+without the flag.
+
+Both updaters check a digest first — nothing downloads when the release
+hasn't changed, so they're safe in a cron or txAdmin schedule.
 
 ## How it fits together
 

@@ -421,7 +421,8 @@ function SnippetsModal({ open, onClose, base, slug }: { open: boolean; onClose: 
       <p className="mb-4 text-[12.5px] leading-relaxed text-ink-2">
         Run these on the FiveM server. Deploy tokens live under Admin → Tokens — put one in place of{' '}
         <code className="rounded border border-line bg-panel-2 px-1 font-mono text-[11px]">gctx_YOUR_DEPLOY_TOKEN</code>.
-        A full updater script ships in the repo at <code className="rounded border border-line bg-panel-2 px-1 font-mono text-[11px]">scripts/updater/</code>.
+        The Linux pull only needs bash and curl; it keeps its state in{' '}
+        <code className="rounded border border-line bg-panel-2 px-1 font-mono text-[11px]">DEST/.gitctx/</code>.
       </p>
       <div className="mb-2 flex gap-1">
         {snippets.map((s) => (

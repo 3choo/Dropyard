@@ -1,6 +1,37 @@
 export function pullSnippets(base: string, slug: string): Array<{ id: string; label: string; code: string }> {
   return [
     {
+      id: 'linux',
+      label: 'Linux',
+      code: `# Mirror the latest release of "${slug}" into DEST (bash + curl, no jq).
+# Downloads only new/changed files and deletes files the release dropped;
+# anything you put there yourself is left alone. Re-run any time.
+curl -fsSL \\
+  -H "Authorization: Bearer gctx_YOUR_DEPLOY_TOKEN" \\
+  "${base}/dl/${slug}/pull.sh" | DEST=/srv/fxserver/resources bash
+
+# Options: FORCE=1 re-downloads everything, PARALLEL=16 for more connections.`,
+    },
+    {
+      id: 'download',
+      label: 'Direct download',
+      code: `# Whole release as one zip, streamed straight from R2
+curl -fL -o release.zip \\
+  -H "Authorization: Bearer gctx_YOUR_DEPLOY_TOKEN" \\
+  "${base}/dl/${slug}/latest?format=zip"
+
+unzip -o release.zip -d /srv/fxserver/resources
+# no unzip? apt install unzip, or: python3 -m zipfile -e release.zip /srv/fxserver/resources`,
+    },
+    {
+      id: 'check',
+      label: 'Version check',
+      code: `# Cheap poll — compare digest before downloading anything
+curl -fsS \\
+  -H "Authorization: Bearer gctx_YOUR_DEPLOY_TOKEN" \\
+  "${base}/api/projects/${slug}/releases/latest/check"`,
+    },
+    {
       id: 'ps',
       label: 'PowerShell',
       code: `# Pull the latest release of "${slug}" into a target folder
@@ -18,22 +49,6 @@ foreach ($f in $rel.files) {
   Write-Host "pulled $($f.path)"
 }
 Write-Host "now at v$($rel.version)"`,
-    },
-    {
-      id: 'check',
-      label: 'Version check',
-      code: `# Cheap poll — compare digest before downloading anything
-curl -s \\
-  -H "Authorization: Bearer gctx_YOUR_DEPLOY_TOKEN" \\
-  "${base}/api/projects/${slug}/releases/latest/check"`,
-    },
-    {
-      id: 'download',
-      label: 'Direct download',
-      code: `# Single-file releases stream straight from R2 via the Worker
-curl -L -o release.zip \\
-  -H "Authorization: Bearer gctx_YOUR_DEPLOY_TOKEN" \\
-  "${base}/dl/${slug}/latest"`,
     },
   ];
 }

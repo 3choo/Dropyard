@@ -47,8 +47,9 @@
   },
   "migrations": [{ "tag": "v1", "new_sqlite_classes": ["ExtractRunner"] }],
 
-  // Extraction is CPU-heavy for big zips (inflate + R2 writes).
-  "limits": { "cpu_ms": 300000 },
+  // Extraction is CPU-heavy for big zips (inflate + R2 writes). A whole-release
+  // zip download reads one R2 object per file, so lift the 10k subrequest default.
+  "limits": { "cpu_ms": 300000, "subrequests": 1000000 },
 
   "vars": {
     "R2_S3_ACCOUNT_ID": "",

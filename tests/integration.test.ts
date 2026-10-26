@@ -1,4 +1,5 @@
 import { exports } from 'cloudflare:workers';
+import { strFromU8, unzipSync } from 'fflate';
 import { afterAll, beforeEach, describe, expect, it } from 'vitest';
 
 /**
@@ -305,6 +306,99 @@ describe('deploy tokens', () => {
       headers: { authorization: 'Bearer gctx_nope' },
     }, '');
     expect(garbage.res.status).toBe(401);
+  });
+});
+
+describe('server pull', () => {
+  const files: Record<string, string> = {
+    'fxmanifest.lua': "fx_version 'cerulean'\n",
+    'stream/big map.ytd': 'y'.repeat(70_000),
+    'html/ü/index.html': '<p>hi</p>',
+  };
+
+  async function publishMultiFile(name: string) {
+    const proj = await call('/api/projects', { method: 'POST', body: JSON.stringify({ name }) });
+    const slug = proj.body.project.slug as string;
+    const rel = await call(`/api/projects/${slug}/releases`, { method: 'POST', body: JSON.stringify({ version: '2.0.0' }) });
+    for (const [path, body] of Object.entries(files)) {
+      const start = await call('/api/uploads', {
+        method: 'POST',
+        body: JSON.stringify({ releaseId: rel.body.release.id, path, size: new TextEncoder().encode(body).length }),
+      });
+      await call(`/api/uploads/${start.body.uploadId}/body`, {
+        method: 'PUT',
+        body,
+        headers: { 'content-type': 'application/octet-stream' },
+      });
+    }
+    const pub = await call(`/api/projects/${slug}/releases/2.0.0/publish`, { method: 'POST' });
+    expect(pub.res.status).toBe(200);
+    return slug;
+  }
+
+  it('streams a multi-file release as a valid zip', async () => {
+    const slug = await publishMultiFile('Zip Me');
+    const res = await worker.fetch(`${ORIGIN}/dl/${slug}/latest`, { headers: { cookie: adminCookie } });
+    expect(res.status).toBe(200);
+    expect(res.headers.get('content-type')).toBe('application/zip');
+    const bytes = new Uint8Array(await res.arrayBuffer());
+    expect(Number(res.headers.get('content-length') ?? bytes.length)).toBe(bytes.length);
+    const entries = unzipSync(bytes);
+    expect(Object.keys(entries).sort()).toEqual(Object.keys(files).sort());
+    for (const [path, body] of Object.entries(files)) {
+      expect(strFromU8(entries[path]!)).toBe(body);
+    }
+  });
+
+  it('zips a single-file release on ?format=zip', async () => {
+    const proj = await call('/api/projects', { method: 'POST', body: JSON.stringify({ name: 'Solo Zip' }) });
+    const slug = proj.body.project.slug as string;
+    const rel = await call(`/api/projects/${slug}/releases`, { method: 'POST', body: JSON.stringify({ version: '1.0.0' }) });
+    const start = await call('/api/uploads', {
+      method: 'POST',
+      body: JSON.stringify({ releaseId: rel.body.release.id, path: 'only.txt', size: 4 }),
+    });
+    await call(`/api/uploads/${start.body.uploadId}/body`, {
+      method: 'PUT',
+      body: 'solo',
+      headers: { 'content-type': 'application/octet-stream' },
+    });
+    await call(`/api/projects/${slug}/releases/1.0.0/publish`, { method: 'POST' });
+
+    const raw = await call(`/dl/${slug}/latest`);
+    expect(raw.text).toBe('solo');
+    const zipped = await worker.fetch(`${ORIGIN}/dl/${slug}/latest?format=zip`, { headers: { cookie: adminCookie } });
+    const entries = unzipSync(new Uint8Array(await zipped.arrayBuffer()));
+    expect(strFromU8(entries['only.txt']!)).toBe('solo');
+  });
+
+  it('serves a plain manifest and a pull script with the token baked in', async () => {
+    const slug = await publishMultiFile('Pull Me');
+    const tok = await call('/api/tokens', { method: 'POST', body: JSON.stringify({ name: 'linux-box' }) });
+    const token = tok.body.token as string;
+    const auth = { authorization: `Bearer ${token}` };
+
+    const manifest = await call(`/dl/${slug}/latest/manifest`, { headers: auth }, '');
+    expect(manifest.res.status).toBe(200);
+    const lines = manifest.text.trimEnd().split('\n');
+    expect(lines).toContain('#version 2.0.0');
+    expect(lines.find((l) => l.startsWith('#digest '))).toMatch(/^#digest [0-9a-f]{64}$/);
+    const entries = lines.filter((l) => !l.startsWith('#')).map((l) => l.split('\t'));
+    expect(entries.map((e) => decodeURIComponent(e[2]!)).sort()).toEqual(Object.keys(files).sort());
+    for (const [fp, size, enc] of entries) {
+      expect(fp).toMatch(/^(sha|etag):/);
+      expect(Number(size)).toBe(new TextEncoder().encode(files[decodeURIComponent(enc!)]!).length);
+      // Each line's path must download through the versioned URL the script builds.
+      const one = await call(`/dl/${slug}/v/2.0.0?path=${enc}`, { headers: auth }, '');
+      expect(one.text).toBe(files[decodeURIComponent(enc!)]);
+    }
+
+    const script = await call(`/dl/${slug}/pull.sh`, { headers: auth }, '');
+    expect(script.res.status).toBe(200);
+    expect(script.text.startsWith('#!/usr/bin/env bash')).toBe(true);
+    expect(script.text).toContain(`SLUG='${slug}'`);
+    expect(script.text).toContain(`TOKEN=\${GITCTX_TOKEN:-'${token}'}`);
+    expect(script.text).not.toContain('__BASE__');
   });
 });
 

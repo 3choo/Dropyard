@@ -1,9 +1,11 @@
 import { Hono, type Context } from 'hono';
 import { forbidden, notFound } from '../lib/http';
+import { pullScript } from '../lib/pullscript';
+import { planZip, zipStream } from '../lib/zipstream';
 import { requireAuthAny, type AppEnv } from '../middleware';
 
 type ProjectRow = { id: string; slug: string; name: string };
-type ReleaseRow = { id: string; version: string; status: string; published_at: number | null };
+type ReleaseRow = { id: string; version: string; status: string; published_at: number | null; digest: string | null };
 type FileRow = {
   id: string;
   path: string;
@@ -17,8 +19,19 @@ export const dlRoutes = new Hono<AppEnv>();
 
 dlRoutes.get('/:slug/latest', requireAuthAny(), (c) => serveRelease(c, 'latest'));
 dlRoutes.get('/:slug/v/:version', requireAuthAny(), (c) => serveRelease(c, c.req.param('version')));
+dlRoutes.get('/:slug/latest/manifest', requireAuthAny(), (c) => serveManifest(c));
+dlRoutes.get('/:slug/pull.sh', requireAuthAny(), async (c) => {
+  const { project } = await resolveRelease(c, 'latest');
+  // Bake in the deploy token the script was fetched with, so `curl … | bash` is all it takes.
+  const authz = c.req.header('authorization');
+  const token = authz?.startsWith('Bearer ') ? authz.slice(7).trim() : (c.req.query('token') ?? '');
+  const script = pullScript(new URL(c.req.url).origin, project.slug, c.get('auth').kind === 'token' ? token : '');
+  return new Response(script, {
+    headers: { 'content-type': 'text/x-shellscript; charset=utf-8', 'cache-control': 'no-store' },
+  });
+});
 
-async function serveRelease(c: Context<AppEnv>, which: string): Promise<Response> {
+async function resolveRelease(c: Context<AppEnv>, which: string): Promise<{ project: ProjectRow; release: ReleaseRow }> {
   const auth = c.get('auth');
   const project = await c.env.DB
     .prepare('SELECT id, slug, name FROM projects WHERE slug = ?')
@@ -32,18 +45,22 @@ async function serveRelease(c: Context<AppEnv>, which: string): Promise<Response
     which === 'latest'
       ? await c.env.DB
           .prepare(
-            "SELECT id, version, status, published_at FROM releases WHERE project_id = ? AND status = 'published' ORDER BY is_latest DESC, published_at DESC LIMIT 1",
+            "SELECT id, version, status, published_at, digest FROM releases WHERE project_id = ? AND status = 'published' ORDER BY is_latest DESC, published_at DESC LIMIT 1",
           )
           .bind(project.id)
           .first<ReleaseRow>()
       : await c.env.DB
           .prepare(
-            "SELECT id, version, status, published_at FROM releases WHERE project_id = ? AND version = ? AND status = 'published'",
+            "SELECT id, version, status, published_at, digest FROM releases WHERE project_id = ? AND version = ? AND status = 'published'",
           )
           .bind(project.id, which)
           .first<ReleaseRow>();
   if (!release) throw notFound('Release not found');
+  return { project, release };
+}
 
+async function serveRelease(c: Context<AppEnv>, which: string): Promise<Response> {
+  const { project, release } = await resolveRelease(c, which);
   const path = c.req.query('path');
   let file: FileRow;
   if (path) {
@@ -59,17 +76,9 @@ async function serveRelease(c: Context<AppEnv>, which: string): Promise<Response
       .bind(release.id)
       .all<FileRow>();
     if (files.results.length === 0) throw notFound('This release has no files');
-    if (files.results.length > 1) {
-      return Response.json(
-        {
-          error: 'release_has_multiple_files',
-          message:
-            `This release contains several files. Download one with ?path=<file>, or fetch the manifest at ` +
-            `/api/projects/${project.slug}/releases/latest for the full list.`,
-          files: files.results.map((f) => f.path),
-        },
-        { status: 409 },
-      );
+    // Several files (or ?format=zip): the whole release as one streamed zip.
+    if (files.results.length > 1 || c.req.query('format') === 'zip') {
+      return serveZip(c, project, release, files.results);
     }
     file = files.results[0]!;
   }
@@ -114,6 +123,95 @@ async function serveRelease(c: Context<AppEnv>, which: string): Promise<Response
   );
 
   return new Response(obj.body, { status: range ? 206 : 200, headers });
+}
+
+function serveZip(c: Context<AppEnv>, project: ProjectRow, release: ReleaseRow, files: FileRow[]): Response {
+  const bucket = c.env.BUCKET;
+  const plan = planZip(
+    files.map((f) => ({
+      name: f.path,
+      size: f.size,
+      open: async () => {
+        const obj = await bucket.get(f.r2_key);
+        if (!obj) throw new Error(`stored object missing for ${f.path}`);
+        return obj.body;
+      },
+    })),
+  );
+  // FixedLengthStream lets the response carry content-length (curl shows real
+  // progress) and aborts the transfer if the bytes ever disagree with the plan.
+  const { readable, writable } = new FixedLengthStream(plan.size);
+  c.executionCtx.waitUntil(
+    zipStream(plan, new Date(release.published_at ?? Date.now()))
+      .pipeTo(writable)
+      .catch((err) => console.error('zip stream failed', project.slug, release.version, err)),
+  );
+  c.executionCtx.waitUntil(
+    c.env.DB
+      .prepare('UPDATE releases SET download_count = download_count + 1 WHERE id = ?')
+      .bind(release.id)
+      .run()
+      .then(() => {})
+      .catch(() => {}),
+  );
+  return new Response(readable, {
+    headers: {
+      'content-type': 'application/zip',
+      'content-disposition': `attachment; filename="${project.slug}-v${release.version}.zip"`,
+      'cache-control': 'private, max-age=0, must-revalidate',
+    },
+  });
+}
+
+/**
+ * Plain-text manifest for the curl-only pull script: "#key value" headers, then
+ * one "<fingerprint>\t<size>\t<url-encoded path>" line per file. The fingerprint
+ * is the upload digest, or for extracted files (no digest) the R2 ETag — content
+ * derived, so a re-extracted but identical file isn't downloaded again.
+ */
+async function serveManifest(c: Context<AppEnv>): Promise<Response> {
+  const { project, release } = await resolveRelease(c, 'latest');
+  const files = await c.env.DB
+    .prepare('SELECT path, r2_key, size, digest FROM release_files WHERE release_id = ? ORDER BY path')
+    .bind(release.id)
+    .all<{ path: string; r2_key: string; size: number; digest: string | null }>();
+  const etags = await objectEtags(
+    c.env.BUCKET,
+    files.results.filter((f) => !f.digest).map((f) => f.r2_key),
+  );
+  const lines = [
+    '#gitctx-manifest 1',
+    `#project ${project.slug}`,
+    `#version ${release.version}`,
+    `#digest ${release.digest ?? ''}`,
+  ];
+  for (const f of files.results) {
+    const etag = etags.get(f.r2_key);
+    const fp = f.digest ? `sha:${f.digest}` : etag ? `etag:${etag}` : `size:${f.size}`;
+    lines.push(`${fp}\t${f.size}\t${encodeURIComponent(f.path)}`);
+  }
+  return new Response(lines.join('\n') + '\n', {
+    headers: { 'content-type': 'text/plain; charset=utf-8', 'cache-control': 'no-store' },
+  });
+}
+
+/** ETags for many keys via prefix listings — one call per 1000 objects, not one per key. */
+async function objectEtags(bucket: R2Bucket, keys: string[]): Promise<Map<string, string>> {
+  const wanted = new Set(keys);
+  const out = new Map<string, string>();
+  // Keys look like p/<pid>/r/<rid>[~sfx]/<path>; list each release prefix once.
+  const prefixes = new Set(keys.map((k) => k.split('/').slice(0, 4).join('/') + '/'));
+  for (const prefix of prefixes) {
+    let cursor: string | undefined;
+    do {
+      const page = await bucket.list({ prefix, cursor, limit: 1000 });
+      for (const obj of page.objects) {
+        if (wanted.has(obj.key)) out.set(obj.key, obj.etag);
+      }
+      cursor = page.truncated ? page.cursor : undefined;
+    } while (cursor);
+  }
+  return out;
 }
 
 function parseRange(header: string | null | undefined, size: number): { offset: number; length: number } | undefined {
