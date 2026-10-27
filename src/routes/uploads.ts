@@ -49,11 +49,6 @@ function singleUploadLimit(env: Env): number {
   return (Number.isFinite(mb) && mb > 0 ? mb : 90) * 1024 * 1024;
 }
 
-/**
- * Start an upload for one file inside a draft release.
- * Small files go through the Worker in a single streamed request; large files
- * get a browser-direct presigned multipart session.
- */
 uploadRoutes.post('/', async (c) => {
   const body = await c.req.json<Record<string, unknown>>().catch(() => null);
   const { releaseId, path, size, contentType, sha256 } = (body ?? {}) as {
@@ -71,7 +66,6 @@ uploadRoutes.post('/', async (c) => {
   if (!cleanPath) throw badRequest('Invalid file path');
   const release = await loadDraftRelease(c.env.DB, releaseId);
 
-  // Re-uploads replace: drop any previous file/session at this path.
   const prevFile = await c.env.DB
     .prepare('SELECT id, r2_key FROM release_files WHERE release_id = ? AND path = ?')
     .bind(releaseId, cleanPath)
@@ -81,8 +75,6 @@ uploadRoutes.post('/', async (c) => {
       c.env.DB.prepare('DELETE FROM release_files WHERE id = ?').bind(prevFile.id),
       c.env.DB.prepare('DELETE FROM upload_sessions WHERE file_id = ?').bind(prevFile.id),
     ]);
-    // Forked drafts share keys with their source release — only delete when
-    // no other release still claims the object.
     c.executionCtx.waitUntil(deleteUnreferencedObjects(c.env.DB, c.env.BUCKET, [prevFile.r2_key]));
   }
   const stale = await c.env.DB
@@ -105,8 +97,6 @@ uploadRoutes.post('/', async (c) => {
   }
 
   const id = randomId(12);
-  // Redirects to a release-private key when the standard key is claimed by
-  // another release (fork clones), so the write can never overwrite shared bytes.
   const r2Key = await writeKeyFor(c.env.DB, release.project_id, release.id, cleanPath, id);
   const limit = singleUploadLimit(c.env);
   const s3 = new R2S3(c.env);
@@ -136,7 +126,6 @@ uploadRoutes.post('/', async (c) => {
   return c.json({ uploadId: id, mode: 'presigned' as const, partSize, totalParts }, 201);
 });
 
-/** Presign a batch of part PUTs; each part carries its SHA-256 for integrity. */
 uploadRoutes.post('/:id/parts', async (c) => {
   const upload = await loadUpload(c.env.DB, c.req.param('id'));
   if (upload.status !== 'active') throw conflict(`Upload is ${upload.status}`);
@@ -158,14 +147,11 @@ uploadRoutes.post('/:id/parts', async (c) => {
     if (typeof p.n !== 'number' || p.n < 1 || p.n > upload.total_parts || typeof p.sha256 !== 'string') {
       throw badRequest('Each part needs a number within range and a base64 SHA-256');
     }
-    // p.sha256 is not signed into the URL: R2 rejects checksum headers on
-    // UploadPart with 501; the digest is sent to /complete instead.
     urls.push({ n: p.n, url: await s3.presignPart(upload.r2_key, upload.s3_upload_id, p.n, contentType) });
   }
   return c.json({ urls });
 });
 
-/** Single-shot body upload for small files, streamed through the Worker. */
 uploadRoutes.put('/:id/body', async (c) => {
   const upload = await loadUpload(c.env.DB, c.req.param('id'));
   if (upload.status !== 'active') throw conflict(`Upload is ${upload.status}`);
@@ -187,7 +173,6 @@ uploadRoutes.put('/:id/body', async (c) => {
   return c.json({ ok: true, size: upload.size, extraction });
 });
 
-/** Complete a presigned multipart upload and verify the stored object. */
 uploadRoutes.post('/:id/complete', async (c) => {
   const upload = await loadUpload(c.env.DB, c.req.param('id'));
   if (upload.status === 'completed') throw conflict('Upload already completed');
@@ -232,7 +217,6 @@ uploadRoutes.post('/:id/complete', async (c) => {
   return c.json({ ok: true, size: upload.size, digest, extraction });
 });
 
-/** List parts already stored in R2, so a reloaded page can resume. */
 uploadRoutes.post('/:id/resume', async (c) => {
   const upload = await loadUpload(c.env.DB, c.req.param('id'));
   if (upload.status !== 'active') throw conflict(`Upload is ${upload.status}`);
@@ -255,7 +239,6 @@ uploadRoutes.post('/:id/abort', async (c) => {
   return c.json({ ok: true });
 });
 
-/** Active sessions for a draft release, so the UI can reconnect after a reload. */
 uploadRoutes.get('/', async (c) => {
   const releaseId = c.req.query('releaseId');
   if (!releaseId) throw badRequest('releaseId query parameter is required');

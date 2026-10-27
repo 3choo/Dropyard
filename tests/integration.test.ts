@@ -1,6 +1,7 @@
 import { exports } from 'cloudflare:workers';
 import { strFromU8, unzipSync } from 'fflate';
 import { afterAll, beforeEach, describe, expect, it } from 'vitest';
+import { R2S3 } from '../src/lib/r2s3';
 
 /**
  * Full-stack integration over the real Worker: bootstrap admin, login,
@@ -388,10 +389,23 @@ describe('server pull', () => {
     for (const [fp, size, enc] of entries) {
       expect(fp).toMatch(/^(sha|etag):/);
       expect(Number(size)).toBe(new TextEncoder().encode(files[decodeURIComponent(enc!)]!).length);
-      // Each line's path must download through the versioned URL the script builds.
-      const one = await call(`/dl/${slug}/v/2.0.0?path=${enc}`, { headers: auth }, '');
+      // ?direct=1 redirects to R2 when S3 credentials exist; without them (as here) it streams.
+      const one = await call(`/dl/${slug}/v/2.0.0?direct=1&path=${enc}`, { headers: auth }, '');
       expect(one.text).toBe(files[decodeURIComponent(enc!)]);
     }
+
+    // A published release never changes, so the manifest is cached and served as-is.
+    const again = await call(`/dl/${slug}/latest/manifest`, { headers: auth }, '');
+    expect(again.text).toBe(manifest.text);
+
+    // Bulk links need S3 credentials; without them the script falls back per file.
+    const links = await call(`/dl/${slug}/v/2.0.0/links`, {
+      method: 'POST',
+      headers: { ...auth, 'content-type': 'text/plain' },
+      body: entries.map((e) => e[2]).join('\n'),
+    }, '');
+    expect(links.res.status).toBe(501);
+    expect(links.body.error).toBe('direct_unavailable');
 
     const script = await call(`/dl/${slug}/pull.sh`, { headers: auth }, '');
     expect(script.res.status).toBe(200);
@@ -441,5 +455,21 @@ describe('health', () => {
   it('answers', async () => {
     const res = await worker.fetch('https://example.com/api/health');
     expect(res.status).toBe(200);
+  });
+});
+
+describe('R2 presigned downloads', () => {
+  it('signs a short-lived GET for the object key', async () => {
+    const s3 = new R2S3({
+      R2_S3_ACCOUNT_ID: 'acct',
+      R2_BUCKET_NAME: 'gitctx',
+      R2_ACCESS_KEY_ID: 'AKIDEXAMPLE',
+      R2_SECRET_ACCESS_KEY: 'secret',
+    } as unknown as Env);
+    const url = new URL(await s3.presignGet('p/x/r/y/stream/a b.ytd'));
+    expect(url.origin).toBe('https://acct.r2.cloudflarestorage.com');
+    expect(url.pathname).toBe('/gitctx/p/x/r/y/stream/a%20b.ytd');
+    expect(url.searchParams.get('X-Amz-Expires')).toBe('900');
+    expect(url.searchParams.get('X-Amz-Signature')).toMatch(/^[0-9a-f]{64}$/);
   });
 });

@@ -60,7 +60,6 @@ function parseCookie(header: string | null): string | undefined {
   return undefined;
 }
 
-/** Session required; deploy tokens are rejected on human endpoints. */
 export function requireSession(): MiddlewareHandler<AppEnv> {
   return async (c, next) => {
     const ctx = await resolveAny(c.env, c.req.raw);
@@ -70,7 +69,6 @@ export function requireSession(): MiddlewareHandler<AppEnv> {
   };
 }
 
-/** Session or deploy token — machine-readable endpoints. */
 export function requireAuthAny(): MiddlewareHandler<AppEnv> {
   return async (c, next) => {
     const ctx = await resolveAny(c.env, c.req.raw);
@@ -92,10 +90,6 @@ export function requireRole(...roles: Role[]): MiddlewareHandler<AppEnv> {
   };
 }
 
-/**
- * Routes behind requireSession/requireRole always carry a session user, but
- * Hono's Variables type keeps the full AuthContext union; this re-narrows.
- */
 export function sessionUser(c: Context<AppEnv>): SessionUser {
   const auth = c.get('auth');
   if (auth.kind !== 'session') throw unauthorized();

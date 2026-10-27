@@ -1,18 +1,8 @@
 import { crc32 } from 'node:zlib';
 
-/**
- * Streaming ZIP writer for whole-release downloads. Entries are stored (no
- * compression — game assets rarely shrink and inflate CPU is the bottleneck),
- * CRCs go into data descriptors so nothing is buffered, and ZIP64 records kick
- * in per entry / for the directory only when a 4 GiB or 65 535-entry boundary
- * is crossed. Every header length is known up front, so the archive's exact
- * byte size is too (planZip().size) and the response can carry content-length.
- */
-
 export type ZipSource = {
   name: string;
   size: number;
-  /** Opens the entry's bytes; called once, in order, while streaming. */
   open: () => Promise<ReadableStream<Uint8Array>>;
 };
 
@@ -20,7 +10,7 @@ type PlannedEntry = ZipSource & { nameBytes: Uint8Array; offset: number; zip64: 
 
 const U32 = 0xffffffff;
 const U16 = 0xffff;
-const FLAGS = 0x0808; // bit 3: sizes/CRC in data descriptor · bit 11: UTF-8 names
+const FLAGS = 0x0808;
 
 const encoder = new TextEncoder();
 
@@ -43,7 +33,13 @@ export function planZip(sources: ZipSource[]): ZipPlan {
   return { entries, cdOffset, cdSize, size, zip64Eocd };
 }
 
-/** Streams the planned archive; byte-for-byte plan.size long. */
+const MB = 1024 * 1024;
+const SMALL_ENTRY = 2 * MB;
+const AHEAD_ENTRIES = 32;
+const AHEAD_BYTES = 24 * MB;
+
+type Fetched = Uint8Array | ReadableStream<Uint8Array>;
+
 export function zipStream(plan: ZipPlan, modified: Date): ReadableStream<Uint8Array> {
   const { time, date } = dosDateTime(modified);
   const crcs: number[] = [];
@@ -51,6 +47,29 @@ export function zipStream(plan: ZipPlan, modified: Date): ReadableStream<Uint8Ar
   let reader: ReadableStreamDefaultReader<Uint8Array> | null = null;
   let crc = 0;
   let done = false;
+
+  const ahead = new Map<number, Promise<Fetched>>();
+  let next = 0;
+  let aheadBytes = 0;
+  let largeAhead = -1;
+
+  const fill = () => {
+    while (next < plan.entries.length && next - i < AHEAD_ENTRIES && largeAhead <= i) {
+      const entry = plan.entries[next]!;
+      let fetched: Promise<Fetched>;
+      if (entry.size <= SMALL_ENTRY) {
+        if (next > i && aheadBytes + entry.size > AHEAD_BYTES) break;
+        aheadBytes += entry.size;
+        fetched = entry.open().then(async (s) => new Uint8Array(await new Response(s).arrayBuffer()));
+      } else {
+        fetched = entry.open();
+        largeAhead = next;
+      }
+      fetched.catch(() => {});
+      ahead.set(next, fetched);
+      next++;
+    }
+  };
 
   return new ReadableStream<Uint8Array>({
     async pull(controller) {
@@ -72,7 +91,20 @@ export function zipStream(plan: ZipPlan, modified: Date): ReadableStream<Uint8Ar
       if (i < plan.entries.length) {
         const entry = plan.entries[i]!;
         controller.enqueue(localHeader(entry, time, date));
-        reader = (await entry.open()).getReader();
+        fill();
+        const fetched = await ahead.get(i)!;
+        ahead.delete(i);
+        if (fetched instanceof Uint8Array) {
+          aheadBytes -= entry.size;
+          if (fetched.length > 0) controller.enqueue(fetched);
+          const sum = crc32(fetched) >>> 0;
+          crcs.push(sum);
+          controller.enqueue(dataDescriptor(sum, entry.size, entry.zip64));
+          i++;
+          fill();
+          return;
+        }
+        reader = fetched.getReader();
         crc = 0;
         return;
       }
@@ -85,6 +117,10 @@ export function zipStream(plan: ZipPlan, modified: Date): ReadableStream<Uint8Ar
     },
     async cancel(reason) {
       await reader?.cancel(reason);
+      for (const fetched of ahead.values()) {
+        fetched.then((f) => (f instanceof ReadableStream ? f.cancel(reason) : undefined)).catch(() => {});
+      }
+      ahead.clear();
     },
   });
 }
@@ -107,11 +143,10 @@ function localHeader(e: PlannedEntry, time: number, date: number): Uint8Array {
   v.setUint32(0, 0x04034b50, true);
   v.setUint16(4, e.zip64 ? 45 : 20, true);
   v.setUint16(6, FLAGS, true);
-  v.setUint16(8, 0, true); // stored
+  v.setUint16(8, 0, true);
   v.setUint16(10, time, true);
   v.setUint16(12, date, true);
-  v.setUint32(14, 0, true); // CRC follows in the data descriptor
-  // Sizes are known, so stream readers get them here too; stored == raw.
+  v.setUint32(14, 0, true);
   v.setUint32(18, e.zip64 ? U32 : e.size, true);
   v.setUint32(22, e.zip64 ? U32 : e.size, true);
   v.setUint16(26, e.nameBytes.length, true);
@@ -157,8 +192,7 @@ function centralHeader(e: PlannedEntry, crc: number, time: number, date: number)
   v.setUint32(24, e.zip64 ? U32 : e.size, true);
   v.setUint16(28, e.nameBytes.length, true);
   v.setUint16(30, e.zip64 ? 28 : 0, true);
-  // comment len, disk start, internal attrs stay 0
-  v.setUint32(38, (0o100644 << 16) >>> 0, true); // -rw-r--r--
+  v.setUint32(38, (0o100644 << 16) >>> 0, true);
   v.setUint32(42, e.zip64 ? U32 : e.offset, true);
   out.set(e.nameBytes, 46);
   if (e.zip64) {
@@ -183,7 +217,6 @@ function endRecords(plan: ZipPlan): Uint8Array {
     v.setBigUint64(4, 44n, true);
     v.setUint16(12, 45, true);
     v.setUint16(14, 45, true);
-    // disk numbers stay 0
     v.setBigUint64(24, BigInt(count), true);
     v.setBigUint64(32, BigInt(count), true);
     v.setBigUint64(40, BigInt(plan.cdSize), true);

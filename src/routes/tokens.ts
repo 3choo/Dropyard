@@ -16,7 +16,6 @@ tokenRoutes.get('/', async (c) => {
   return c.json({ tokens: rows.results });
 });
 
-/** Created token plaintext is shown exactly once, in this response. */
 tokenRoutes.post('/', async (c) => {
   const body = await c.req.json<Record<string, unknown>>().catch(() => null);
   const { name, projectId } = (body ?? {}) as { name?: string; projectId?: string };

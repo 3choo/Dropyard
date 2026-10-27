@@ -63,8 +63,6 @@ export async function verifyPassword(password: string, stored: string): Promise<
   return constantTimeEqual(actual, expected);
 }
 
-// --- Sessions ---------------------------------------------------------------
-
 export async function createSession(db: D1Database, userId: string): Promise<string> {
   const token = randomToken(32);
   const id = await sha256Hex(token);
@@ -110,8 +108,6 @@ export function clearSessionCookie(): string {
 export function setCookie(c: Context, header: string): void {
   c.header('set-cookie', header, { append: true });
 }
-
-// --- Login rate limiting ------------------------------------------------------
 
 const RATE_WINDOW_MS = 15 * 60 * 1000;
 const RATE_MAX_FAILURES = 8;

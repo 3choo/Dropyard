@@ -3,15 +3,12 @@ import { ApiError } from './http';
 
 export const DEFAULT_PART_SIZE = 64 * 1024 * 1024;
 export const MAX_PARTS = 10_000;
-export const MAX_OBJECT_BYTES = 4_500 * 1024 * 1024 * 1024; // R2 multipart ceiling is ~5 TiB
+export const MAX_OBJECT_BYTES = 4_500 * 1024 * 1024 * 1024;
 
 declare global {
   interface Env {
-    /** Worker secret, not in wrangler.jsonc. */
     R2_ACCESS_KEY_ID?: string;
-    /** Worker secret, not in wrangler.jsonc. */
     R2_SECRET_ACCESS_KEY?: string;
-    /** Worker secret shared with the extraction container, not in wrangler.jsonc. */
     EXTRACT_CALLBACK_SECRET?: string;
   }
 }
@@ -40,11 +37,6 @@ function unescapeXml(s: string): string {
 
 export type ListedPart = { n: number; etag: string; size: number };
 
-/**
- * Thin S3-compatible client for R2, used only for browser-direct multipart
- * uploads (presigned part URLs) and their lifecycle calls. Downloads stream
- * through the R2 binding instead.
- */
 export class R2S3 {
   readonly enabled: boolean;
   private readonly client: AwsClient;
@@ -92,20 +84,6 @@ export class R2S3 {
     return unescapeXml(uploadId);
   }
 
-  /**
-   * Presign a part PUT. aws4fetch skips content-type when signing unless
-   * allHeaders is set, but browsers implicitly send a Content-Type derived
-   * from the Blob's MIME type — R2 rejects the mismatch, and the resulting
-   * error response carries no CORS headers, so the browser only reports a
-   * vague CORS failure. Always sign content-type and have the client send
-   * the byte-identical value.
-   *
-   * x-amz-checksum-sha256 must NOT be signed or sent here: R2 does not
-   * implement checksum headers on UploadPart (only Content-MD5) and answers
-   * 501 NotImplemented, which the browser then masks as a CORS failure.
-   * Part integrity is covered by the client-computed SHA-256 digests sent
-   * to /complete instead.
-   */
   async presignPart(
     key: string,
     uploadId: string,
@@ -122,7 +100,13 @@ export class R2S3 {
     return signed.url;
   }
 
-  /** Server-side part upload, used when extracting archives into R2. */
+  async presignGet(key: string, expiresSeconds = 900): Promise<string> {
+    this.requireEnabled();
+    const url = this.objectUrl(key, { 'X-Amz-Expires': String(expiresSeconds) });
+    const signed = await this.client.sign(new Request(url, { method: 'GET' }), { aws: { signQuery: true } });
+    return signed.url;
+  }
+
   async uploadPart(key: string, uploadId: string, partNumber: number, body: ArrayBuffer): Promise<string> {
     this.requireEnabled();
     const res = await this.client.fetch(this.objectUrl(key, { partNumber: String(partNumber), uploadId }), {

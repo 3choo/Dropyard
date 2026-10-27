@@ -51,7 +51,6 @@ authRoutes.get('/status', async (c) => {
   return c.json({ needsSetup, authenticated: !!user, user });
 });
 
-/** One-time bootstrap: create the first admin when no users exist. */
 authRoutes.post('/setup', async (c) => {
   const users = await c.env.DB.prepare('SELECT COUNT(*) AS n FROM users').first<{ n: number }>();
   if ((users?.n ?? 0) > 0) throw forbidden('Setup is already complete');

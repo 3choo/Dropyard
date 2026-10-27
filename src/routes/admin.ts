@@ -10,8 +10,6 @@ const ROLES: Role[] = ['admin', 'uploader', 'viewer'];
 export const adminRoutes = new Hono<AppEnv>();
 adminRoutes.use('*', requireRole('admin'));
 
-// --- Users --------------------------------------------------------------------
-
 adminRoutes.get('/users', async (c) => {
   const rows = await c.env.DB.prepare(
     'SELECT id, email, name, role, created_at, last_login_at FROM users ORDER BY created_at',
@@ -49,8 +47,6 @@ adminRoutes.delete('/users/:id', async (c) => {
   return c.json({ ok: true });
 });
 
-// --- Invites ------------------------------------------------------------------
-
 adminRoutes.get('/invites', async (c) => {
   const rows = await c.env.DB.prepare(
     'SELECT code, email, role, created_at, expires_at, used_at FROM invites ORDER BY created_at DESC LIMIT 100',
@@ -76,8 +72,6 @@ adminRoutes.delete('/invites/:code', async (c) => {
   return c.json({ ok: true });
 });
 
-// --- Audit log ----------------------------------------------------------------
-
 adminRoutes.get('/audit', async (c) => {
   const limit = Math.min(parseInt(c.req.query('limit') ?? '80', 10) || 80, 300);
   const before = parseInt(c.req.query('before') ?? '0', 10) || Number.MAX_SAFE_INTEGER;
@@ -87,8 +81,6 @@ adminRoutes.get('/audit', async (c) => {
     .all();
   return c.json({ entries: rows.results });
 });
-
-// --- Settings (Discord webhook) ------------------------------------------------
 
 adminRoutes.get('/settings', async (c) => {
   const row = await c.env.DB

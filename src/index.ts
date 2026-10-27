@@ -11,7 +11,6 @@ import { uploadRoutes } from './routes/uploads';
 import { ExtractRunner } from './lib/extract';
 import { requireSession, type AppEnv } from './middleware';
 
-// The extraction container's durable object must be exported from the entry module.
 export { ExtractRunner };
 
 const app = new Hono<AppEnv>();
@@ -32,7 +31,6 @@ app.route('/api/tokens', tokenRoutes);
 app.route('/api/admin', adminRoutes);
 app.route('/api/internal', internalRoutes);
 
-/** Totals for the dashboard rail — any signed-in teammate can read these. */
 app.get('/api/stats', requireSession(), async (c) => {
   const row = await c.env.DB.prepare(
     `SELECT
@@ -60,8 +58,6 @@ app.onError((err, c) => {
 });
 
 app.notFound((c) => {
-  // Everything that is not /api or /dl should have been served as a static
-  // asset by the platform; if the Worker still sees it, fall back to the SPA.
   if (c.req.path.startsWith('/api/') || c.req.path.startsWith('/dl/')) {
     return c.json({ error: 'not_found', message: 'No such endpoint' }, 404);
   }

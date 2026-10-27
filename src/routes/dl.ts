@@ -1,6 +1,7 @@
 import { Hono, type Context } from 'hono';
-import { forbidden, notFound } from '../lib/http';
+import { ApiError, badRequest, forbidden, notFound } from '../lib/http';
 import { pullScript } from '../lib/pullscript';
+import { R2S3 } from '../lib/r2s3';
 import { planZip, zipStream } from '../lib/zipstream';
 import { requireAuthAny, type AppEnv } from '../middleware';
 
@@ -20,9 +21,9 @@ export const dlRoutes = new Hono<AppEnv>();
 dlRoutes.get('/:slug/latest', requireAuthAny(), (c) => serveRelease(c, 'latest'));
 dlRoutes.get('/:slug/v/:version', requireAuthAny(), (c) => serveRelease(c, c.req.param('version')));
 dlRoutes.get('/:slug/latest/manifest', requireAuthAny(), (c) => serveManifest(c));
+dlRoutes.post('/:slug/v/:version/links', requireAuthAny(), (c) => serveLinks(c));
 dlRoutes.get('/:slug/pull.sh', requireAuthAny(), async (c) => {
   const { project } = await resolveRelease(c, 'latest');
-  // Bake in the deploy token the script was fetched with, so `curl … | bash` is all it takes.
   const authz = c.req.header('authorization');
   const token = authz?.startsWith('Bearer ') ? authz.slice(7).trim() : (c.req.query('token') ?? '');
   const script = pullScript(new URL(c.req.url).origin, project.slug, c.get('auth').kind === 'token' ? token : '');
@@ -76,11 +77,19 @@ async function serveRelease(c: Context<AppEnv>, which: string): Promise<Response
       .bind(release.id)
       .all<FileRow>();
     if (files.results.length === 0) throw notFound('This release has no files');
-    // Several files (or ?format=zip): the whole release as one streamed zip.
     if (files.results.length > 1 || c.req.query('format') === 'zip') {
       return serveZip(c, project, release, files.results);
     }
     file = files.results[0]!;
+  }
+
+  const s3 = new R2S3(c.env);
+  if (c.req.query('direct') === '1' && s3.enabled) {
+    countFileDownload(c, release.id, file.id);
+    return new Response(null, {
+      status: 302,
+      headers: { location: await s3.presignGet(file.r2_key), 'cache-control': 'no-store' },
+    });
   }
 
   const filename = file.path.split('/').pop() ?? 'download';
@@ -110,8 +119,11 @@ async function serveRelease(c: Context<AppEnv>, which: string): Promise<Response
     headers.set('content-length', String(file.size));
   }
 
-  const releaseId = release.id;
-  const fileId = file.id;
+  countFileDownload(c, release.id, file.id);
+  return new Response(obj.body, { status: range ? 206 : 200, headers });
+}
+
+function countFileDownload(c: Context<AppEnv>, releaseId: string, fileId: string): void {
   c.executionCtx.waitUntil(
     c.env.DB
       .batch([
@@ -121,8 +133,6 @@ async function serveRelease(c: Context<AppEnv>, which: string): Promise<Response
       .then(() => {})
       .catch(() => {}),
   );
-
-  return new Response(obj.body, { status: range ? 206 : 200, headers });
 }
 
 function serveZip(c: Context<AppEnv>, project: ProjectRow, release: ReleaseRow, files: FileRow[]): Response {
@@ -138,8 +148,6 @@ function serveZip(c: Context<AppEnv>, project: ProjectRow, release: ReleaseRow, 
       },
     })),
   );
-  // FixedLengthStream lets the response carry content-length (curl shows real
-  // progress) and aborts the transfer if the bytes ever disagree with the plan.
   const { readable, writable } = new FixedLengthStream(plan.size);
   c.executionCtx.waitUntil(
     zipStream(plan, new Date(release.published_at ?? Date.now()))
@@ -163,14 +171,13 @@ function serveZip(c: Context<AppEnv>, project: ProjectRow, release: ReleaseRow, 
   });
 }
 
-/**
- * Plain-text manifest for the curl-only pull script: "#key value" headers, then
- * one "<fingerprint>\t<size>\t<url-encoded path>" line per file. The fingerprint
- * is the upload digest, or for extracted files (no digest) the R2 ETag — content
- * derived, so a re-extracted but identical file isn't downloaded again.
- */
 async function serveManifest(c: Context<AppEnv>): Promise<Response> {
   const { project, release } = await resolveRelease(c, 'latest');
+  const headers = { 'content-type': 'text/plain; charset=utf-8', 'cache-control': 'no-store' };
+  const cacheKey = `p/${project.id}/r/${release.id}~manifest-v1.txt`;
+  const cached = await c.env.BUCKET.get(cacheKey);
+  if (cached) return new Response(cached.body, { headers });
+
   const files = await c.env.DB
     .prepare('SELECT path, r2_key, size, digest FROM release_files WHERE release_id = ? ORDER BY path')
     .bind(release.id)
@@ -190,16 +197,65 @@ async function serveManifest(c: Context<AppEnv>): Promise<Response> {
     const fp = f.digest ? `sha:${f.digest}` : etag ? `etag:${etag}` : `size:${f.size}`;
     lines.push(`${fp}\t${f.size}\t${encodeURIComponent(f.path)}`);
   }
-  return new Response(lines.join('\n') + '\n', {
+  const text = lines.join('\n') + '\n';
+  if (files.results.every((f) => f.digest || etags.has(f.r2_key))) {
+    c.executionCtx.waitUntil(c.env.BUCKET.put(cacheKey, text).then(() => {}).catch(() => {}));
+  }
+  return new Response(text, { headers });
+}
+
+const MAX_LINKS = 250_000;
+const LINK_TTL_SECONDS = 12 * 60 * 60;
+
+async function serveLinks(c: Context<AppEnv>): Promise<Response> {
+  const s3 = new R2S3(c.env);
+  if (!s3.enabled) {
+    throw new ApiError(501, 'direct_unavailable', 'Direct R2 links need the R2 S3 API credentials on the Worker');
+  }
+  const { release } = await resolveRelease(c, c.req.param('version') ?? '');
+  const wanted = (await c.req.text()).split('\n').filter(Boolean);
+  if (wanted.length > MAX_LINKS) throw badRequest(`At most ${MAX_LINKS} paths per request`);
+
+  const files = await c.env.DB
+    .prepare('SELECT path, r2_key FROM release_files WHERE release_id = ?')
+    .bind(release.id)
+    .all<{ path: string; r2_key: string }>();
+  const keyByPath = new Map(files.results.map((f) => [f.path, f.r2_key]));
+
+  const out: string[] = [];
+  for (let i = 0; i < wanted.length; i += 500) {
+    const chunk = wanted.slice(i, i + 500);
+    const signed = await Promise.all(
+      chunk.map(async (enc) => {
+        let path: string;
+        try {
+          path = decodeURIComponent(enc);
+        } catch {
+          return null;
+        }
+        const key = keyByPath.get(path);
+        return key ? `${enc}\t${await s3.presignGet(key, LINK_TTL_SECONDS)}` : null;
+      }),
+    );
+    for (const line of signed) if (line) out.push(line);
+  }
+
+  c.executionCtx.waitUntil(
+    c.env.DB
+      .prepare('UPDATE releases SET download_count = download_count + 1 WHERE id = ?')
+      .bind(release.id)
+      .run()
+      .then(() => {})
+      .catch(() => {}),
+  );
+  return new Response(out.join('\n') + '\n', {
     headers: { 'content-type': 'text/plain; charset=utf-8', 'cache-control': 'no-store' },
   });
 }
 
-/** ETags for many keys via prefix listings — one call per 1000 objects, not one per key. */
 async function objectEtags(bucket: R2Bucket, keys: string[]): Promise<Map<string, string>> {
   const wanted = new Set(keys);
   const out = new Map<string, string>();
-  // Keys look like p/<pid>/r/<rid>[~sfx]/<path>; list each release prefix once.
   const prefixes = new Set(keys.map((k) => k.split('/').slice(0, 4).join('/') + '/'));
   for (const prefix of prefixes) {
     let cursor: string | undefined;

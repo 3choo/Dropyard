@@ -52,7 +52,6 @@ function presentExtraction(job: ExtractJobRow) {
     const parsed = JSON.parse(job.archive_paths) as Array<{ path: string }>;
     if (Array.isArray(parsed)) archives = parsed.map((v) => v.path);
   } catch {
-    // keep empty
   }
   return {
     id: job.id,
@@ -176,7 +175,6 @@ projectRoutes.patch('/:slug', requireRole('admin', 'uploader'), async (c) => {
 projectRoutes.delete('/:slug', requireRole('admin'), async (c) => {
   const project = await getProjectBySlug(c.env.DB, c.req.param('slug') ?? '');
   if (!project) throw notFound('Project not found');
-  // Remove every stored object, then the rows (cascades releases/files/sessions).
   let cursor: string | undefined;
   do {
     const listing = await c.env.BUCKET.list({ prefix: `p/${project.id}/`, cursor });
@@ -189,8 +187,6 @@ projectRoutes.delete('/:slug', requireRole('admin'), async (c) => {
   await audit(c.env.DB, sessionUser(c).email, 'project.delete', `project:${project.slug}`);
   return c.json({ ok: true });
 });
-
-// --- Releases ------------------------------------------------------------------
 
 projectRoutes.post('/:slug/releases', requireRole('admin', 'uploader'), async (c) => {
   const project = await getProjectBySlug(c.env.DB, c.req.param('slug') ?? '');
@@ -213,9 +209,6 @@ projectRoutes.post('/:slug/releases', requireRole('admin', 'uploader'), async (c
   await audit(c.env.DB, sessionUser(c).email, 'release.create', `project:${project.slug}/v${normalized}`);
   return c.json({ release: { id, version: normalized, title: title ?? '', notes: notes ?? '', status: 'draft' } }, 201);
 });
-
-// --- Machine endpoints (stable URLs for the FiveM updater) ----------------------
-// Registered before /:version so "latest" is not captured as a version.
 
 async function resolveLatestPublished(c: Context<AppEnv>): Promise<{
   project: ProjectRow;
@@ -286,8 +279,6 @@ projectRoutes.get('/:slug/releases/:version', requireAuthAny(), async (c) => {
     .prepare('SELECT * FROM extract_jobs WHERE release_id = ? ORDER BY created_at DESC')
     .bind(release.id)
     .all<ExtractJobRow>();
-  // Console lines for the jobs worth watching: live ones, plus recent history
-  // (the 7zz trail is the first thing you want after a failed unpack).
   const logJobs = jobs.results.slice(0, 3);
   const extractLogs: Record<string, { seq: number; line: string; at: number }[]> = {};
   for (const job of logJobs) {
@@ -306,10 +297,6 @@ projectRoutes.get('/:slug/releases/:version', requireAuthAny(), async (c) => {
   });
 });
 
-// --- File viewer / editor -------------------------------------------------------
-// Deploy tokens get the same visibility as the release endpoint above: drafts
-// are invisible to them, published releases are readable.
-
 async function loadReleaseForRead(c: Context<AppEnv>): Promise<{ project: ProjectRow; release: ReleaseRow }> {
   const auth = c.get('auth');
   const project = await getProjectBySlug(c.env.DB, c.req.param('slug') ?? '');
@@ -323,7 +310,6 @@ async function loadReleaseForRead(c: Context<AppEnv>): Promise<{ project: Projec
   return { project, release };
 }
 
-/** File content for the viewer: text inline, everything else as metadata. */
 projectRoutes.get('/:slug/releases/:version/blob', requireAuthAny(), async (c) => {
   const { project, release } = await loadReleaseForRead(c);
   const path = sanitizeFilePath(c.req.query('path') ?? '');
@@ -345,7 +331,6 @@ projectRoutes.get('/:slug/releases/:version/blob', requireAuthAny(), async (c) =
       const content = new TextDecoder('utf-8', { fatal: true, ignoreBOM: false }).decode(await obj.arrayBuffer());
       return c.json({ kind: 'text', ...meta, content, truncated: false });
     } catch {
-      // Binary bytes behind a text extension — report as binary below.
     }
   }
   return c.json({
@@ -355,12 +340,6 @@ projectRoutes.get('/:slug/releases/:version/blob', requireAuthAny(), async (c) =
   });
 });
 
-/**
- * Fork a release into a new draft: file rows are cloned and the source
- * release's R2 objects are shared (no byte copying). An optional edited file
- * is written into the fork's own namespace. Published releases stay immutable;
- * this is how the editor saves changes to one.
- */
 projectRoutes.post('/:slug/releases/:version/fork', requireRole('admin', 'uploader'), async (c) => {
   const project = await getProjectBySlug(c.env.DB, c.req.param('slug') ?? '');
   if (!project) throw notFound('Project not found');
@@ -430,7 +409,6 @@ projectRoutes.post('/:slug/releases/:version/fork', requireRole('admin', 'upload
   return c.json({ release: { id, version: normalized, status: 'draft' }, filesCloned: clone.meta.changes ?? 0 }, 201);
 });
 
-/** Save edited text into a draft release in place. Published releases reject. */
 projectRoutes.put('/:slug/releases/:version/files/content', requireRole('admin', 'uploader'), async (c) => {
   const project = await getProjectBySlug(c.env.DB, c.req.param('slug') ?? '');
   if (!project) throw notFound('Project not found');
@@ -459,8 +437,6 @@ projectRoutes.put('/:slug/releases/:version/files/content', requireRole('admin',
       .prepare('UPDATE release_files SET r2_key = ?, size = ?, content_type = ?, digest = ?, part_digests = ?, created_at = ? WHERE id = ?')
       .bind(r2Key, bytes.byteLength, contentTypeForPath(path), digest, '[]', now, existing.id)
       .run();
-    // The old object may have been a release-private alt key a previous edit
-    // created; drop it if nothing references it anymore.
     c.executionCtx.waitUntil(deleteUnreferencedObjects(c.env.DB, c.env.BUCKET, [existing.r2_key]));
   } else {
     await c.env.DB
@@ -527,7 +503,6 @@ projectRoutes.post('/:slug/releases/:version/publish', requireRole('admin', 'upl
   const user = sessionUser(c);
   await audit(c.env.DB, user.email, 'release.publish', `project:${project.slug}/v${release.version}`, { digest });
 
-  // Optional Discord announcement, off unless configured by an admin.
   const webhook = await c.env.DB
     .prepare("SELECT value FROM settings WHERE key = 'discord_webhook_url'")
     .first<{ value: string }>();
@@ -581,17 +556,12 @@ projectRoutes.delete('/:slug/releases/:version', requireRole('admin', 'uploader'
   if (release.status === 'published' && user.role !== 'admin') {
     throw forbidden('Only admins can delete a published release');
   }
-  // Collect the release's object keys, drop the release (its release_files
-  // claims cascade away), then delete only objects no other release
-  // references — forked releases share keys with their source.
   const rows = await c.env.DB
     .prepare('SELECT DISTINCT r2_key FROM release_files WHERE release_id = ?')
     .bind(release.id)
     .all<{ r2_key: string }>();
   const keys = rows.results.map((r) => r.r2_key);
   await c.env.DB.prepare('DELETE FROM releases WHERE id = ?').bind(release.id).run();
-  // Leftover upload-session scratch objects; the no-trailing-slash prefix also
-  // catches release-private ~suffix keys. Shared keys stay reference-protected.
   let cursor: string | undefined;
   do {
     const listing = await c.env.BUCKET.list({ prefix: `p/${project.id}/r/${release.id}`, cursor });

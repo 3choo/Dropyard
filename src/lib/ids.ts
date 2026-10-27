@@ -35,7 +35,6 @@ export function slugify(name: string): string {
   return slug || `p-${randomId(4).toLowerCase()}`;
 }
 
-/** Sanitize a user-supplied release path: forward slashes, no .., no leading /. */
 export function sanitizeFilePath(path: string): string | null {
   const cleaned = path.replace(/\\/g, '/').replace(/^\/+/, '').replace(/\/+/g, '/');
   if (!cleaned || cleaned.length > 900) return null;

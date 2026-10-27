@@ -1,4 +1,3 @@
-/** Extension → content-type for extracted archive entries. Beyond the map, entries stay application/octet-stream. */
 const TYPES: Record<string, string> = {
   html: 'text/html; charset=utf-8',
   css: 'text/css; charset=utf-8',
@@ -35,7 +34,6 @@ const TYPES: Record<string, string> = {
   rar: 'application/vnd.rar',
   '7z': 'application/x-7z-compressed',
   wasm: 'application/wasm',
-  // Grand Theft Auto V resource formats commonly shipped in FiveM packs.
   ytd: 'application/x-gtav-ytd',
   ydr: 'application/x-gtav-ydr',
   ydd: 'application/x-gtav-ydd',
@@ -58,12 +56,6 @@ export function contentTypeForPath(path: string): string {
   return (match && TYPES[match[1]!.toLowerCase()]) || 'application/octet-stream';
 }
 
-/**
- * Extensions the file viewer/editor treats as text. Liberal by design — a
- * "text" path holding binary junk still fails the strict UTF-8 decode and
- * falls back to the binary page. Extensionless files (LICENSE, Dockerfile)
- * are also attempted as text.
- */
 const TEXT_EXTS = new Set([
   'txt', 'text', 'md', 'markdown', 'log', 'csv', 'tsv',
   'lua', 'cfg', 'conf', 'ini', 'env', 'properties', 'meta', 'toml', 'yml', 'yaml', 'json', 'jsonc',
@@ -81,5 +73,4 @@ export function isTextPath(path: string): boolean {
   return TEXT_EXTS.has(match[1]!.toLowerCase());
 }
 
-/** Cap for serving/decoding file content inline in the viewer and editor. */
 export const MAX_TEXT_BLOB_BYTES = 1_000_000;

@@ -3,15 +3,8 @@ import { handleExtractCallback, isExtractPhase, type ExtractCallback } from '../
 import { AppEnv } from '../middleware';
 import { sha256Hex } from '../lib/ids';
 
-/**
- * Machine endpoint for the extraction container: it reports each unpacked
- * file (singly or batched), progress stages, console log lines and the job
- * outcome here. Authenticated with a shared secret, not a session — the
- * container is not a browser.
- */
 export const internalRoutes = new Hono<AppEnv>();
 
-/** Upper bound on console lines per event — the container batches, never floods. */
 const MAX_LOG_LINES = 200;
 
 internalRoutes.post('/extract', async (c) => {
@@ -72,7 +65,6 @@ internalRoutes.post('/extract', async (c) => {
     }
   } catch (err) {
     const code = err instanceof Error ? err.message : 'callback_failed';
-    // 410 tells the container its job is gone or closed — stop reporting, exit.
     return c.json({ error: code }, 410);
   }
   return c.json({ ok: true });

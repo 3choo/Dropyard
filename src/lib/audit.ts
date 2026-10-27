@@ -13,6 +13,5 @@ export async function audit(
       .bind(actor, action, target, meta === undefined ? null : JSON.stringify(meta), nowMs())
       .run();
   } catch {
-    // Audit must never break the request path.
   }
 }

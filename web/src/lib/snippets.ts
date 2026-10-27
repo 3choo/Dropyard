@@ -10,7 +10,8 @@ curl -fsSL \\
   -H "Authorization: Bearer gctx_YOUR_DEPLOY_TOKEN" \\
   "${base}/dl/${slug}/pull.sh" | DEST=/srv/fxserver/resources bash
 
-# Options: FORCE=1 re-downloads everything, PARALLEL=16 for more connections.`,
+# Files come straight from R2, 128 at a time. FORCE=1 re-downloads everything,
+# PARALLEL=256 opens more connections.`,
     },
     {
       id: 'download',

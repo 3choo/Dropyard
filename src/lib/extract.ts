@@ -6,7 +6,6 @@ import { R2S3 } from './r2s3';
 import { deleteUnreferencedObjects } from './r2refs';
 
 const MB = 1024 * 1024;
-/** Server-side part size when streaming a big entry into R2 multipart. */
 const EXTRACT_PART_BYTES = 8 * MB;
 
 export type ArchiveVolume = { path: string; r2Key: string };
@@ -15,7 +14,7 @@ export type ExtractJobRow = {
   id: string;
   release_id: string;
   kind: 'zip' | 'rar';
-  archive_paths: string; // json: ArchiveVolume[]
+  archive_paths: string;
   status: 'queued' | 'running' | 'done' | 'failed';
   files_added: number;
   bytes_added: number;
@@ -31,7 +30,6 @@ export type ExtractJobRow = {
   bytes_done: number;
 };
 
-/** Coarse job phases, mirrored by the extraction container. */
 export type ExtractPhase = 'download' | 'scan' | 'extract' | 'upload' | 'finish';
 
 const PHASES: ExtractPhase[] = ['download', 'scan', 'extract', 'upload', 'finish'];
@@ -40,7 +38,6 @@ export function isExtractPhase(v: unknown): v is ExtractPhase {
   return typeof v === 'string' && PHASES.includes(v as ExtractPhase);
 }
 
-/** Console lines kept per job; the writer trims anything older. */
 const LOG_CAP = 400;
 
 type UnpackCaps = { files: number; fileBytes: number; totalBytes: number };
@@ -57,13 +54,6 @@ function unpackCaps(env: Env): UnpackCaps {
   };
 }
 
-/**
- * What kind of archive is this file?
- * - zip / rar: extract on upload completion
- * - rar-part: a continuation volume (.part2.rar, .r00…); never auto-starts,
- *   it is picked up when the first volume's job runs (or via Retry).
- * - null: not an archive.
- */
 export function detectArchive(path: string): 'zip' | 'rar' | 'rar-part' | null {
   const lower = path.toLowerCase();
   if (lower.endsWith('.zip')) return 'zip';
@@ -73,7 +63,6 @@ export function detectArchive(path: string): 'zip' | 'rar' | 'rar-part' | null {
   return null;
 }
 
-/** RAR volume family: "pack.part2.rar", "pack.rar" and "pack.r00" all belong to "pack". */
 function volumeFamily(path: string): string {
   return path.replace(/\.(part\d+\.rar|r\d{2}|rar)$/i, '');
 }
@@ -89,11 +78,6 @@ function parseVolumes(json: string): ArchiveVolume[] {
   }
 }
 
-/**
- * Where extracted entries land. Normally the release's own prefix; forked
- * drafts share archive keys with the source release, so their output would
- * otherwise overwrite the source's objects — those get a job-scoped namespace.
- */
 async function extractionPrefix(
   db: D1Database,
   releaseId: string,
@@ -119,10 +103,6 @@ async function loadDraftReleaseRow(db: D1Database, releaseId: string) {
     .first<{ id: string; project_id: string; status: string }>();
 }
 
-/**
- * Called after an upload is finalized. Creates an extract job for archives and
- * kicks off the right engine; returns what the API should report to the client.
- */
 export async function maybeStartExtraction(
   env: Env,
   waitUntil: (p: Promise<unknown>) => void,
@@ -132,7 +112,6 @@ export async function maybeStartExtraction(
   if (!detected || detected === 'rar-part') return null;
   const kind = detected;
 
-  // A re-upload replaces an archive that may still be extracting: kill that job.
   const active = await env.DB
     .prepare("SELECT id, archive_paths FROM extract_jobs WHERE release_id = ? AND status IN ('queued','running')")
     .bind(opts.releaseId)
@@ -145,7 +124,6 @@ export async function maybeStartExtraction(
 
   const volumes: ArchiveVolume[] = [{ path: opts.path, r2Key: opts.r2Key }];
   if (kind === 'rar') {
-    // Pick up every sibling volume already uploaded to this release.
     const rows = await env.DB
       .prepare('SELECT path, r2_key FROM release_files WHERE release_id = ?')
       .bind(opts.releaseId)
@@ -176,7 +154,6 @@ export async function maybeStartExtraction(
   return { id: jobId, kind };
 }
 
-/** Re-run a failed job (Retry button): fresh job, fresh volume scan. */
 export async function retryExtraction(
   env: Env,
   waitUntil: (p: Promise<unknown>) => void,
@@ -228,8 +205,6 @@ export async function retryExtraction(
   return (await loadJob(env.DB, jobId))!;
 }
 
-// --- Job lifecycle ---------------------------------------------------------------
-
 function fmtDur(ms: number): string {
   const s = Math.max(1, Math.round(ms / 1000));
   if (s < 90) return `${s}s`;
@@ -249,11 +224,6 @@ function fmtBytes(n: number): string {
   return `${v >= 100 || u === 0 ? Math.round(v) : v.toFixed(1)} ${units[u]}`;
 }
 
-/**
- * Append console lines to a job's ring buffer. Lines are trimmed and capped at
- * LOG_CAP per job; seq assignment is single-writer per job in practice (the
- * container posts sequentially, the zip path runs one loop).
- */
 export async function appendJobLog(env: Env, jobId: string, lines: string[]): Promise<void> {
   const clean = lines
     .map((l) => String(l ?? '').trimEnd())
@@ -286,7 +256,6 @@ async function completeJob(env: Env, jobId: string): Promise<void> {
   await appendJobLog(env, jobId, [
     `done in ${fmtDur(nowMs() - job.created_at)} · ${job.files_added} files · ${fmtBytes(job.bytes_added)}`,
   ]);
-  // The user chose to drop the archive once its contents are in the release.
   const volumeKeys: string[] = [];
   for (const volume of parseVolumes(job.archive_paths)) {
     await env.DB
@@ -302,7 +271,6 @@ async function completeJob(env: Env, jobId: string): Promise<void> {
     .run();
 }
 
-/** Remove every file a job produced, then mark it failed. No-op unless the job was live. */
 export async function failJob(env: Env, jobId: string, message: string): Promise<void> {
   const job = await loadJob(env.DB, jobId);
   if (!job || (job.status !== 'queued' && job.status !== 'running')) return;
@@ -326,7 +294,6 @@ async function cleanupExtractedFiles(env: Env, jobId: string): Promise<void> {
   await env.DB.prepare('UPDATE extract_jobs SET files_added = 0, bytes_added = 0 WHERE id = ?').bind(jobId).run();
 }
 
-/** Insert one extracted file row; replaces any previous file at the same path. */
 async function insertExtractedFile(
   env: Env,
   jobId: string,
@@ -364,8 +331,6 @@ async function insertExtractedFile(
   ]);
 }
 
-// --- ZIP: stream-extract inside the Worker ----------------------------------------
-
 class CapError extends Error {}
 
 type EntrySink = { write: (data: Uint8Array) => Promise<void>; end: () => Promise<void> };
@@ -399,12 +364,9 @@ async function runZipExtraction(
   const archive = volumes[0]!;
   const caps = unpackCaps(env);
   const s3 = new R2S3(env);
-  // Multipart state of the entry currently in flight, so a failure can abort it.
   let liveUploadId: string | null = null;
   let liveKey: string | null = null;
 
-  // Live progress: % of the archive stream consumed; totals are unknown until
-  // the central directory at the end, so bytes read is the only honest numerator.
   const progress = { bytesRead: 0, entries: 0, lastUpdateBytes: 0, lastLogBytes: 0 };
   const maybeReportProgress = async (): Promise<void> => {
     if (progress.bytesRead - progress.lastUpdateBytes < 16 * MB) return;
@@ -456,8 +418,6 @@ async function runZipExtraction(
     unzipper.register(UnzipInflate);
     unzipper.register(UnzipPassThrough);
 
-    // Push the R2 stream through the unzipper; awaiting `chain` after each chunk
-    // keeps decompression from outrunning the R2 writes (bounded memory).
     const reader = obj.body.getReader();
     for (;;) {
       const { done, value } = await reader.read();
@@ -507,7 +467,6 @@ async function runZipExtraction(
         pending = [];
         pendingLen = 0;
         if (final && uploadId === null) {
-          // Entire entry fit in the buffer: one plain put.
           await env.BUCKET.put(destKey, chunk, { httpMetadata: { contentType } });
           await insertExtractedFile(env, jobId, releaseId, destKey, clean, chunk.length, contentType, caps);
           progress.entries += 1;
@@ -520,8 +479,6 @@ async function runZipExtraction(
           etags.push({ n, etag });
         }
         if (final) {
-          // Entry sizes that are exact multiples of the part size arrive here
-          // with no remainder; complete with the parts collected so far.
           await ensureUpload();
           await s3.complete(destKey, uploadId!, etags);
           liveUploadId = null;
@@ -563,8 +520,6 @@ async function runZipExtraction(
     await failJob(env, jobId, err instanceof Error ? err.message : 'ZIP extraction failed').catch(() => {});
   }
 }
-
-// --- RAR: hand off to the extraction container ------------------------------------
 
 async function runRarExtraction(
   env: Env,
@@ -615,18 +570,11 @@ async function runRarExtraction(
       const text = await res.text().catch(() => '');
       throw new Error(`Extraction container rejected the job: ${res.status} ${text.slice(0, 300)}`);
     }
-    // The container reports progress via /api/internal/extract and finishes the job.
   } catch (err) {
     await failJob(env, jobId, err instanceof Error ? err.message : 'RAR extraction failed').catch(() => {});
   }
 }
 
-// --- Container durable object -------------------------------------------------------
-
-/**
- * One instance per extract job (idFromName(jobId)). When the container exits —
- * crash, OOM or idle shutdown — any job still marked running has died with it.
- */
 export class ExtractRunner extends Container {
   defaultPort = 8080;
   sleepAfter = '30m';
@@ -638,8 +586,6 @@ export class ExtractRunner extends Container {
   }
 }
 
-// --- Callback handlers (wired to POST /api/internal/extract) ------------------------
-
 export type ExtractCallback =
   | { jobId: string; type: 'file'; path: string; size: number; contentType?: string }
   | { jobId: string; type: 'files'; files: { path: string; size: number; contentType?: string }[] }
@@ -650,7 +596,6 @@ export type ExtractCallback =
       type: 'stage';
       phase: ExtractPhase;
       detail?: string;
-      /** One console line to append atomically with the stage change. */
       log?: string;
       totalFiles?: number;
       totalBytes?: number;
@@ -659,7 +604,6 @@ export type ExtractCallback =
     }
   | { jobId: string; type: 'log'; lines: string[] };
 
-/** Non-negative integer or undefined — the only numbers a stage event may carry. */
 function optCount(v: unknown): number | undefined {
   return typeof v === 'number' && Number.isInteger(v) && v >= 0 ? v : undefined;
 }
@@ -692,16 +636,8 @@ async function applyStage(
     .run();
 }
 
-/** Max entries accepted in one 'files' callback — one D1 batch per chunk. */
 const MAX_CALLBACK_FILES = 1000;
 
-/**
- * Insert a chunk of extracted files as a single D1 batch. The container has
- * already enforced every cap against the archive listing before extracting,
- * so this only re-checks the chunk against the job's running totals — no
- * COUNT/SUM scan per file (that was O(n²) on archives with tens of thousands
- * of entries).
- */
 async function insertExtractedFiles(
   env: Env,
   job: ExtractJobRow,
@@ -716,7 +652,6 @@ async function insertExtractedFiles(
     throw new Error(`Archive exceeds the ${caps.files} file unpack limit (MAX_UNPACK_FILES)`);
   }
   const now = nowMs();
-  // Dedupe by cleaned path, last wins, so same-chunk duplicates collapse.
   const byPath = new Map<string, { size: number; contentType: string }>();
   let bytes = 0;
   for (const f of files) {
