@@ -155,10 +155,12 @@ export async function collectPack(store: GitStore, wants: string[], haves: strin
   for (const [, data] of trees) entries.push({ type: 'tree', data, compress: true });
   const metas = await store.metas([...blobs.keys()]);
   const inlineBlobs: string[] = [];
-  for (const [sha, path] of blobs) {
+  for (const [sha] of blobs) {
     const meta = metas.get(sha);
     if (!meta) throw new Error(`blob ${sha} missing`);
-    if (meta.r2_key) entries.push({ type: 'blob', size: meta.size, key: meta.r2_key, compress: isTextPath(path) });
+    // Blobs in R2 go out uncompressed: deflating in the Worker runs at ~20 MB/s
+    // of CPU and a multi-GB clone would hit the 5-minute CPU limit.
+    if (meta.r2_key) entries.push({ type: 'blob', size: meta.size, key: meta.r2_key, compress: false });
     else inlineBlobs.push(sha);
   }
   if (inlineBlobs.length > 0) {
