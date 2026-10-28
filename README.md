@@ -14,6 +14,10 @@ pulls them over stable, token-authenticated URLs.
 - Deploy tokens (global or per-project) for the FiveM server
 - Email + password accounts, three roles: admin / uploader / viewer
 - Optional Discord announcement on publish
+- **Real Git hosting**: every project is a Git repository that GitHub Desktop
+  (or plain `git`) clones, pulls and pushes, with a GitHub-style Code tab,
+  commit history, diffs, branches, pull requests with reviews, issues and
+  comments. Releases are tagged snapshots of commits.
 
 ## One-time setup (~5 minutes)
 
@@ -95,6 +99,30 @@ How it behaves:
   `MAX_UNPACK_FILE_MB` (5120), `MAX_UNPACK_TOTAL_MB` (51200). Unpacking a huge
   ZIP is CPU-bound in the Worker, which is why `limits.cpu_ms` is raised.
 
+### Using GitHub Desktop
+
+1. In gitctx, open **Access tokens** (sidebar) and create a token for this
+   computer. Copy it; it is shown once.
+2. Open a project and press **Clone** to copy its URL
+   (`https://<your-host>/git/<project>.git`), or press **Open in GitHub
+   Desktop**.
+3. In GitHub Desktop choose **File → Clone repository → URL**, paste the URL,
+   and when it asks for credentials enter your email as the username and the
+   token as the password.
+
+Commit and push as usual. Pushes to the default branch are fast-forward only;
+an admin can mark it **protected** in project settings, which makes changes go
+through a pull request with an approving review.
+
+An existing project with releases but no history yet shows an **Import
+releases** card on its Code tab: it turns the published releases into tagged
+commits, oldest first, without copying any file data in R2.
+
+Limits worth knowing: Cloudflare caps a request body at 100 MB on the Free and
+Pro plans (500 MB on Business), so a single push must stay under that. Push
+large changes in several commits. The very first clone of an imported project
+downloads the whole library, which can be many GB.
+
 ### Custom domain later
 
 Dash → your Worker → **Settings → Domains & Routes → Add → Custom domain**
@@ -161,6 +189,10 @@ src/index.ts (Hono)
    ├── /api/uploads/*   upload sessions: presigned parts + single-stream
    ├── /api/internal/*  extraction container callbacks (shared-secret auth)
    ├── /api/admin/*     members, invites, tokens, audit, webhook
+   ├── /api/projects/:slug/repo/*   tree, blobs, commits, compare, web commits, import
+   ├── /api/projects/:slug/issues|pulls/*  issues, pull requests, reviews, comments
+   ├── /api/me/tokens   personal access tokens for git
+   ├── /git/<slug>.git/*  Git smart HTTP (upload-pack v0/v2, receive-pack)
    ├── /dl/*            streaming downloads from R2 (Range + ETag support)
    └── D1 metadata, R2 objects at p/<project>/r/<release>/<path>
 ```
@@ -175,6 +207,20 @@ Worker (fflate, entries written straight back to R2), while a `.rar` is handed
 to the `gitctx-extract` container (7-Zip), which downloads the volume set from
 R2, unpacks, uploads each file and reports progress back over
 `/api/internal/extract`.
+
+Git objects live beside the release files: trees and commits sit in D1
+(`git_objects`, `git_commits`), blobs in R2 at `p/<project>/git/<sha>`.
+Imported blobs reuse the release files' existing R2 keys, and deleting a
+release never removes an object that a commit still references. Pushed packs
+are parsed as a stream, so a large blob goes straight to R2 without being
+held in memory.
+
+## Upgrading an existing deployment
+
+```bash
+npx wrangler d1 migrations apply gitctx --remote   # adds 0004_git and 0005_collab
+npm run deploy
+```
 
 ## Scripts
 

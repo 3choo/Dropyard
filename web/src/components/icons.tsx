@@ -185,3 +185,70 @@ export const IconEye = (p: P) => (
     <circle cx="12" cy="12" r="2.5" />
   </Icon>
 );
+
+export const IconCode = (p: P) => (
+  <Icon {...p}>
+    <path d="m8 7-5 5 5 5M16 7l5 5-5 5" />
+  </Icon>
+);
+
+export const IconBranch = (p: P) => (
+  <Icon {...p}>
+    <circle cx="6" cy="5" r="2" />
+    <circle cx="6" cy="19" r="2" />
+    <circle cx="18" cy="7" r="2" />
+    <path d="M6 7v10M18 9c0 5-6 4-11.5 8" />
+  </Icon>
+);
+
+export const IconCommit = (p: P) => (
+  <Icon {...p}>
+    <circle cx="12" cy="12" r="3.5" />
+    <path d="M3 12h5.5M15.5 12H21" />
+  </Icon>
+);
+
+export const IconPullRequest = (p: P) => (
+  <Icon {...p}>
+    <circle cx="6" cy="5" r="2" />
+    <circle cx="6" cy="19" r="2" />
+    <circle cx="18" cy="19" r="2" />
+    <path d="M6 7v10M18 17V9a3 3 0 0 0-3-3h-4m0 0 2.5-2.5M11 6l2.5 2.5" />
+  </Icon>
+);
+
+export const IconMerge = (p: P) => (
+  <Icon {...p}>
+    <circle cx="6" cy="5" r="2" />
+    <circle cx="6" cy="19" r="2" />
+    <circle cx="18" cy="12" r="2" />
+    <path d="M6 7v10M6 7c0 4 4 5 10 5" />
+  </Icon>
+);
+
+export const IconIssue = (p: P) => (
+  <Icon {...p}>
+    <circle cx="12" cy="12" r="8.5" />
+    <circle cx="12" cy="12" r="1.5" fill="currentColor" stroke="none" />
+  </Icon>
+);
+
+export const IconTag = (p: P) => (
+  <Icon {...p}>
+    <path d="M3.5 12.5V4.5a1 1 0 0 1 1-1h8l8 8-9 9z" />
+    <circle cx="8" cy="8" r="1.5" />
+  </Icon>
+);
+
+export const IconComment = (p: P) => (
+  <Icon {...p}>
+    <path d="M4 5h16v11H9l-5 4z" />
+  </Icon>
+);
+
+export const IconHistory = (p: P) => (
+  <Icon {...p}>
+    <path d="M3 12a9 9 0 1 0 3-6.7L3 8" />
+    <path d="M3 3v5h5M12 7v5l3 2" />
+  </Icon>
+);

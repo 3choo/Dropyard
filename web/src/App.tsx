@@ -4,7 +4,12 @@ import { useAuth } from './auth/AuthProvider';
 import { Spinner } from './components/ui';
 import { AppShell } from './components/layout/AppShell';
 import { DashboardPage } from './features/dashboard/DashboardPage';
-import { ProjectPage } from './features/project/ProjectPage';
+import { ProjectLayout, ReleasesTab } from './features/project/ProjectPage';
+import { CodeTab } from './features/repo/CodeTab';
+import { BlobPage, EditPage } from './features/repo/BlobPage';
+import { BranchesPage, CommitPage, CommitsTab, ComparePage } from './features/repo/History';
+import { IssueList, IssuePage, NewIssuePage } from './features/collab/Issues';
+import { TokensPage } from './features/settings/TokensPage';
 import { ReleasePage } from './features/release/ReleasePage';
 import { NewReleasePage } from './features/release/NewReleasePage';
 import { AdminPage } from './features/admin/AdminPage';
@@ -63,7 +68,27 @@ const router = createBrowserRouter([
     element: <ShellGate />,
     children: [
       { path: '/', element: <DashboardPage /> },
-      { path: '/p/:slug', element: <ProjectPage /> },
+      {
+        path: '/p/:slug',
+        element: <ProjectLayout />,
+        children: [
+          { index: true, element: <CodeTab /> },
+          { path: 'tree/*', element: <CodeTab /> },
+          { path: 'blob/*', element: <BlobPage /> },
+          { path: 'edit/*', element: <EditPage /> },
+          { path: 'new', element: <EditPage creating /> },
+          { path: 'commits', element: <CommitsTab /> },
+          { path: 'commit/:sha', element: <CommitPage /> },
+          { path: 'compare', element: <ComparePage /> },
+          { path: 'branches', element: <BranchesPage /> },
+          { path: 'pulls', element: <IssueList kind="pull" /> },
+          { path: 'pulls/:number', element: <IssuePage kind="pull" /> },
+          { path: 'issues', element: <IssueList kind="issue" /> },
+          { path: 'issues/new', element: <NewIssuePage /> },
+          { path: 'issues/:number', element: <IssuePage kind="issue" /> },
+          { path: 'releases', element: <ReleasesTab /> },
+        ],
+      },
       { path: '/p/:slug/new-release', element: <NewReleasePage /> },
       { path: '/p/:slug/r/:version', element: <ReleasePage /> },
       {
@@ -81,6 +106,7 @@ const router = createBrowserRouter([
         ),
       },
       { path: '/admin', element: <AdminPage /> },
+      { path: '/settings/tokens', element: <TokensPage /> },
       { path: '*', element: <Navigate to="/" replace /> },
     ],
   },

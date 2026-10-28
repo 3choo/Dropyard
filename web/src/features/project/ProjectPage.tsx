@@ -1,11 +1,23 @@
 import { useState, type FormEvent } from 'react';
-import { Link, useNavigate, useParams } from 'react-router';
+import { Link, NavLink, Outlet, useNavigate, useOutletContext, useParams } from 'react-router';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { motion } from 'motion/react';
 import { ApiError, api } from '../../api/client';
 import { useAuth } from '../../auth/AuthProvider';
-import { Button, Chip, EmptyState, Input, Modal, Textarea, toast } from '../../components/ui';
-import { IconFolder, IconSettings, IconTrash, IconUpload } from '../../components/icons';
+import { Button, Chip, EmptyState, Input, Modal, Select, Textarea, toast } from '../../components/ui';
+import {
+  IconCode,
+  IconFolder,
+  IconHistory,
+  IconIssue,
+  IconLayers,
+  IconPullRequest,
+  IconSettings,
+  IconTrash,
+  IconUpload,
+} from '../../components/icons';
+import type { RepoSummary } from '../repo/types';
+import { CloneButton } from '../repo/CloneButton';
 import { formatBytes, timeAgo } from '../../lib/format';
 
 type Project = {
@@ -17,6 +29,7 @@ type Project = {
 };
 
 type ReleaseRow = {
+  commit_sha: string | null;
   id: string;
   version: string;
   title: string;
@@ -29,9 +42,21 @@ type ReleaseRow = {
   size: number;
 };
 
-export function ProjectPage() {
+export type ProjectContext = {
+  project: Project;
+  releases: ReleaseRow[];
+  repo: RepoSummary | undefined;
+  refetchRepo: () => void;
+  canUpload: boolean;
+};
+
+export function useProject(): ProjectContext {
+  return useOutletContext<ProjectContext>();
+}
+
+/** Project frame: header plus GitHub-style tabs (Code, Commits, Pull requests, Issues, Releases). */
+export function ProjectLayout() {
   const { slug = '' } = useParams();
-  const navigate = useNavigate();
   const { user } = useAuth();
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [deleteOpen, setDeleteOpen] = useState(false);
@@ -39,6 +64,21 @@ export function ProjectPage() {
   const query = useQuery({
     queryKey: ['project', slug],
     queryFn: () => api<{ project: Project; releases: ReleaseRow[] }>(`/api/projects/${slug}`),
+  });
+  const repo = useQuery({
+    queryKey: ['repo', slug],
+    queryFn: () => api<RepoSummary>(`/api/projects/${slug}/repo`),
+    enabled: query.isSuccess,
+  });
+  const pulls = useQuery({
+    queryKey: ['issues', slug, 'pull', 'open'],
+    queryFn: () => api<{ open: number }>(`/api/projects/${slug}/issues?kind=pull&state=open`),
+    enabled: query.isSuccess,
+  });
+  const issues = useQuery({
+    queryKey: ['issues', slug, 'issue', 'open'],
+    queryFn: () => api<{ open: number }>(`/api/projects/${slug}/issues?kind=issue&state=open`),
+    enabled: query.isSuccess,
   });
 
   if (query.isLoading) {
@@ -55,13 +95,31 @@ export function ProjectPage() {
   const { project, releases } = query.data;
   const canUpload = user?.role === 'admin' || user?.role === 'uploader';
   const isAdmin = user?.role === 'admin';
+  const published = releases.filter((r) => r.status === 'published').length;
+
+  const tab = ({ isActive }: { isActive: boolean }) =>
+    `relative flex h-10 items-center gap-1.5 whitespace-nowrap px-1 text-[13px] transition-colors ${
+      isActive ? 'text-ink after:absolute after:inset-x-0 after:-bottom-px after:h-0.5 after:rounded-full after:bg-accent' : 'text-ink-2 hover:text-ink'
+    }`;
+  const count = (n: number | undefined) =>
+    n ? <span className="rounded-full bg-panel-2 px-1.5 font-mono text-[10.5px] leading-[18px] text-ink-2 tnum">{n}</span> : null;
+
+  const context: ProjectContext = {
+    project,
+    releases,
+    repo: repo.data,
+    refetchRepo: () => void repo.refetch(),
+    canUpload,
+  };
 
   return (
-    <div className="mx-auto max-w-4xl px-5 py-8 md:px-8 md:py-10">
+    <div className="mx-auto max-w-5xl px-5 py-8 md:px-8 md:py-10">
       <div className="flex flex-col gap-4 md:flex-row md:items-start md:justify-between md:gap-4">
         <div className="min-w-0">
           <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
-            <h1 className="text-[22px] font-semibold tracking-[-0.02em] md:truncate">{project.name}</h1>
+            <h1 className="text-[22px] font-semibold tracking-[-0.02em] md:truncate">
+              <Link to={`/p/${slug}`}>{project.name}</Link>
+            </h1>
             <span className="rounded-md border border-line bg-panel px-1.5 py-0.5 font-mono text-[11px] text-ink-3">
               {project.slug}
             </span>
@@ -71,12 +129,7 @@ export function ProjectPage() {
           ) : null}
         </div>
         <div className="flex shrink-0 items-center gap-2">
-          {canUpload ? (
-            <Button variant="primary" onClick={() => navigate(`/p/${slug}/new-release`)}>
-              <IconUpload size={14} />
-              New release
-            </Button>
-          ) : null}
+          {repo.data ? <CloneButton cloneUrl={repo.data.cloneUrl} /> : null}
           {canUpload ? (
             <Button variant="secondary" onClick={() => setSettingsOpen(true)} aria-label="Project settings">
               <IconSettings size={14} />
@@ -90,13 +143,62 @@ export function ProjectPage() {
         </div>
       </div>
 
-      <div className="mb-2 mt-9 flex items-baseline justify-between">
-        <h2 className="text-[15px] font-semibold">Releases</h2>
+      <nav className="mt-6 flex gap-5 overflow-x-auto border-b border-line" aria-label="Project sections">
+        <NavLink to={`/p/${slug}`} end className={tab}>
+          <IconCode size={14} className="text-ink-3" /> Code
+        </NavLink>
+        <NavLink to={`/p/${slug}/commits`} className={tab}>
+          <IconHistory size={14} className="text-ink-3" /> Commits {count(repo.data?.commitCount)}
+        </NavLink>
+        <NavLink to={`/p/${slug}/pulls`} className={tab}>
+          <IconPullRequest size={14} className="text-ink-3" /> Pull requests {count(pulls.data?.open)}
+        </NavLink>
+        <NavLink to={`/p/${slug}/issues`} className={tab}>
+          <IconIssue size={14} className="text-ink-3" /> Issues {count(issues.data?.open)}
+        </NavLink>
+        <NavLink to={`/p/${slug}/releases`} className={tab}>
+          <IconLayers size={14} className="text-ink-3" /> Releases {count(published)}
+        </NavLink>
+      </nav>
+
+      <div className="pt-6">
+        <Outlet context={context} />
+      </div>
+
+      <SettingsModal
+        open={settingsOpen}
+        onClose={() => setSettingsOpen(false)}
+        project={project}
+        repo={repo.data}
+        isAdmin={isAdmin}
+        onSaved={() => {
+          void query.refetch();
+          void repo.refetch();
+        }}
+      />
+      <DeleteModal open={deleteOpen} onClose={() => setDeleteOpen(false)} project={project} />
+    </div>
+  );
+}
+
+export function ReleasesTab() {
+  const { project, releases, canUpload } = useProject();
+  const slug = project.slug;
+  const navigate = useNavigate();
+
+  return (
+    <div>
+      <div className="mb-4 flex items-center justify-between gap-3">
         <span className="font-mono text-[11.5px] text-ink-3 tnum">
           {formatBytes(releases.reduce((s, r) => s + r.size, 0), 0)} stored
         </span>
+        {canUpload ? (
+          <Button variant="primary" onClick={() => navigate(`/p/${slug}/new-release`)}>
+            <IconUpload size={14} />
+            New release
+          </Button>
+        ) : null}
       </div>
-
       {releases.length === 0 ? (
         <EmptyState
           icon={<IconUpload />}
@@ -150,6 +252,7 @@ export function ProjectPage() {
                   {r.is_latest ? <Chip tone="accent">latest</Chip> : null}
                   {r.status === 'draft' ? <Chip tone="warn">draft</Chip> : null}
                   <span className="min-w-0 flex-1 truncate text-[13px] text-ink-2">{r.title || '—'}</span>
+                  {r.commit_sha ? <span className="font-mono text-[11px] text-ink-3">{r.commit_sha.slice(0, 7)}</span> : null}
                 </div>
                 <div className="mt-1.5 flex flex-wrap items-center gap-x-4 gap-y-0.5 font-mono text-[11px] text-ink-3 tnum">
                   <span className="whitespace-nowrap">{r.files_count} files</span>
@@ -163,13 +266,6 @@ export function ProjectPage() {
         </div>
       )}
 
-      <SettingsModal
-        open={settingsOpen}
-        onClose={() => setSettingsOpen(false)}
-        project={project}
-        onSaved={() => void query.refetch()}
-      />
-      <DeleteModal open={deleteOpen} onClose={() => setDeleteOpen(false)} project={project} />
     </div>
   );
 }
@@ -178,18 +274,35 @@ function SettingsModal({
   open,
   onClose,
   project,
+  repo,
+  isAdmin,
   onSaved,
 }: {
   open: boolean;
   onClose: () => void;
   project: Project;
+  repo: RepoSummary | undefined;
+  isAdmin: boolean;
   onSaved: () => void;
 }) {
   const [name, setName] = useState(project.name);
   const [description, setDescription] = useState(project.description);
+  const [defaultBranch, setDefaultBranch] = useState<string | null>(null);
+  const [protect, setProtect] = useState<boolean | null>(null);
+  const branch = defaultBranch ?? repo?.defaultBranch ?? 'main';
+  const protectDefault = protect ?? repo?.protectDefault ?? false;
 
   const save = useMutation({
-    mutationFn: () => api(`/api/projects/${project.slug}`, { method: 'PATCH', body: JSON.stringify({ name, description }) }),
+    mutationFn: () =>
+      api(`/api/projects/${project.slug}`, {
+        method: 'PATCH',
+        body: JSON.stringify({
+          name,
+          description,
+          ...(defaultBranch && defaultBranch !== repo?.defaultBranch ? { defaultBranch } : {}),
+          ...(isAdmin && protect !== null ? { protectDefault: protect } : {}),
+        }),
+      }),
     onSuccess: () => {
       toast('Project updated');
       onSaved();
@@ -215,6 +328,34 @@ function SettingsModal({
           <label className="mb-1.5 block text-[12px] text-ink-2">Description</label>
           <Textarea rows={3} value={description} onChange={(e) => setDescription(e.target.value)} maxLength={2000} />
         </div>
+        {repo && repo.branches.length > 0 ? (
+          <div>
+            <label className="mb-1.5 block text-[12px] text-ink-2">Default branch</label>
+            <Select value={branch} onChange={(e) => setDefaultBranch(e.target.value)} className="w-full font-mono">
+              {repo.branches.map((b) => (
+                <option key={b.name} value={b.name}>
+                  {b.name}
+                </option>
+              ))}
+            </Select>
+          </div>
+        ) : null}
+        {isAdmin ? (
+          <label className="flex cursor-pointer items-start gap-2.5 rounded-lg border border-line bg-panel-2/50 px-3 py-2.5">
+            <input
+              type="checkbox"
+              checked={protectDefault}
+              onChange={(e) => setProtect(e.target.checked)}
+              className="mt-0.5 accent-[#C9F24F]"
+            />
+            <span className="text-[12.5px] leading-relaxed text-ink-2">
+              <span className="font-medium text-ink">Protect {branch}</span>
+              <br />
+              Changes reach {branch} only through pull requests with an approving review. Direct pushes and browser
+              commits to it are refused.
+            </span>
+          </label>
+        ) : null}
         <div className="flex items-center justify-between pt-1">
           <span className="font-mono text-[11px] text-ink-3">slug: {project.slug} (fixed)</span>
           <div className="flex gap-2">

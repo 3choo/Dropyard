@@ -38,7 +38,9 @@ Confirmed:
 - Downloads stream through the Worker from R2 (token checks + counting), no size cap.
 - Machine API: light version check, release manifest JSON, stable download URLs; Bearer or `?token=` auth.
 - Auth: email + password, D1-backed sessions, invite-based signup, login rate limiting.
-- Constraints: no git protocol (web-only uploads — deliberate), no public/community pages in v1, no on-the-fly zip bundling in v1 (serve files as uploaded).
+- Git hosting: each project is a Git repo over smart HTTP, used from GitHub Desktop with a personal access token. Code tab, commits, diffs, branches, compare, web edits, pull requests (merge or squash, reviews, line comments, optional protected default branch requiring approval), issues and comments. Releases can be cut from a commit and get a `v<version>` tag on publish; published releases can be imported into tagged history.
+- Deliberately not built: branch channels for the server, search, blame, activity feed, per-project permissions, labels.
+- Constraints: a push must fit Cloudflare's request body cap (100 MB on Free/Pro); no public/community pages in v1, no on-the-fly zip bundling in v1 (serve files as uploaded).
 - Undecided: none blocking v1. Turnstile on login is optional hardening; Discord webhook is optional and off by default.
 
 ## Brand Commitments

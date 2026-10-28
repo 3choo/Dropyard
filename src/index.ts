@@ -4,8 +4,12 @@ import { ApiError } from './lib/http';
 import { adminRoutes } from './routes/admin';
 import { authRoutes } from './routes/auth';
 import { dlRoutes } from './routes/dl';
+import { gitRoutes } from './routes/git';
 import { internalRoutes } from './routes/internal';
+import { issueRoutes } from './routes/issues';
+import { meRoutes } from './routes/me';
 import { projectRoutes } from './routes/projects';
+import { repoRoutes } from './routes/repo';
 import { tokenRoutes } from './routes/tokens';
 import { uploadRoutes } from './routes/uploads';
 import { ExtractRunner } from './lib/extract';
@@ -26,10 +30,13 @@ app.get('/api/health', (c) => c.json({ ok: true, name: 'gitctx' }));
 
 app.route('/api/auth', authRoutes);
 app.route('/api/projects', projectRoutes);
+app.route('/api/projects', repoRoutes);
+app.route('/api/projects', issueRoutes);
 app.route('/api/uploads', uploadRoutes);
 app.route('/api/tokens', tokenRoutes);
 app.route('/api/admin', adminRoutes);
 app.route('/api/internal', internalRoutes);
+app.route('/api/me', meRoutes);
 
 app.get('/api/stats', requireSession(), async (c) => {
   const row = await c.env.DB.prepare(
@@ -48,6 +55,7 @@ app.get('/api/stats', requireSession(), async (c) => {
 });
 
 app.route('/dl', dlRoutes);
+app.route('/git', gitRoutes);
 
 app.onError((err, c) => {
   if (err instanceof ApiError) {
@@ -58,6 +66,9 @@ app.onError((err, c) => {
 });
 
 app.notFound((c) => {
+  if (c.req.path.startsWith('/git/')) {
+    return c.text('Not found\n', 404);
+  }
   if (c.req.path.startsWith('/api/') || c.req.path.startsWith('/dl/')) {
     return c.json({ error: 'not_found', message: 'No such endpoint' }, 404);
   }

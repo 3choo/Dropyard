@@ -3,7 +3,7 @@ import { useQuery } from '@tanstack/react-query';
 import { api } from '../../api/client';
 import { useAuth } from '../../auth/AuthProvider';
 import { formatBytes } from '../../lib/format';
-import { IconActivity, IconLayers, IconLogout } from '../icons';
+import { IconActivity, IconKey, IconLayers, IconLogout } from '../icons';
 import { CommandPalette } from './CommandPalette';
 
 function Logo() {
@@ -74,6 +74,14 @@ export function AppShell() {
           >
             Projects
           </NavLink>
+          <NavLink
+            to="/settings/tokens"
+            className={({ isActive }) =>
+              `rounded-lg px-2.5 py-1.5 ${isActive ? 'bg-panel-2 text-ink' : 'text-ink-2'}`
+            }
+          >
+            Tokens
+          </NavLink>
           {user.role === 'admin' ? (
             <NavLink
               to="/admin"
@@ -104,6 +112,15 @@ export function AppShell() {
                 <span className={`h-1.5 w-1.5 rounded-[2px] ${isActive ? 'bg-accent' : 'bg-line-2'}`} />
                 <IconLayers size={15} className="text-ink-3" />
                 Projects
+              </>
+            )}
+          </NavLink>
+          <NavLink to="/settings/tokens" className={({ isActive }) => navItem(isActive)}>
+            {({ isActive }) => (
+              <>
+                <span className={`h-1.5 w-1.5 rounded-[2px] ${isActive ? 'bg-accent' : 'bg-line-2'}`} />
+                <IconKey size={15} className="text-ink-3" />
+                Access tokens
               </>
             )}
           </NavLink>

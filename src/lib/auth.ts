@@ -148,3 +148,25 @@ export async function clearLoginAttempts(db: D1Database, email: string, ip: stri
   const key = await sha256Hex(`${email}|${ip}`);
   await db.prepare('DELETE FROM login_attempts WHERE key = ?').bind(key).run();
 }
+
+export const PAT_PREFIX = 'gctp_';
+
+/** Resolves a personal access token (what git / GitHub Desktop send as the password). */
+export async function resolveUserToken(db: D1Database, raw: string): Promise<SessionUser | null> {
+  if (!raw.startsWith(PAT_PREFIX)) return null;
+  const row = await db
+    .prepare(
+      `SELECT t.id AS token_id, u.id, u.email, u.name, u.role
+       FROM user_tokens t JOIN users u ON u.id = t.user_id
+       WHERE t.token_hash = ?`,
+    )
+    .bind(await sha256Hex(raw))
+    .first<{ token_id: string; id: string; email: string; name: string; role: Role }>();
+  if (!row) return null;
+  void db
+    .prepare('UPDATE user_tokens SET last_used_at = ? WHERE id = ?')
+    .bind(nowMs(), row.token_id)
+    .run()
+    .catch(() => {});
+  return { id: row.id, email: row.email, name: row.name, role: row.role };
+}

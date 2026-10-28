@@ -1,10 +1,11 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from 'react';
-import { Link, useNavigate, useParams } from 'react-router';
+import { Link, useNavigate, useParams, useSearchParams } from 'react-router';
 import { useMutation, useQuery } from '@tanstack/react-query';
 import { AnimatePresence, motion } from 'motion/react';
 import { ApiError, api } from '../../api/client';
 import { useAuth } from '../../auth/AuthProvider';
-import { Button, Input, Modal, Textarea, toast } from '../../components/ui';
+import { Button, Input, Modal, Select, Textarea, toast } from '../../components/ui';
+import type { RepoSummary } from '../repo/types';
 import { IconAlert, IconArrowLeft, IconPause, IconPlay, IconUpload, IconX } from '../../components/icons';
 import { formatBytes, formatThroughput, shortHash, timeAgo } from '../../lib/format';
 import { ChunkMosaic } from '../upload/ChunkMosaic';
@@ -57,19 +58,36 @@ export function NewReleasePage() {
     queryFn: () => api<{ project: { name: string } }>(`/api/projects/${slug}`),
   });
 
+  const [search] = useSearchParams();
+  const repo = useQuery({
+    queryKey: ['repo', slug],
+    queryFn: () => api<RepoSummary>(`/api/projects/${slug}/repo`),
+  });
+
   // --- Phase A: draft metadata -------------------------------------------------
   const [version, setVersion] = useState('');
   const [title, setTitle] = useState('');
   const [notes, setNotes] = useState('');
   const [releaseId, setReleaseId] = useState<string | null>(null);
+  // A release is cut from code (a branch, tag or commit) or from uploaded files.
+  const [source, setSource] = useState<'code' | 'upload' | null>(search.get('ref') ? 'code' : null);
+  const [ref, setRef] = useState(search.get('ref') ?? '');
+  const hasCode = !!repo.data && !repo.data.empty;
+  const mode = source ?? (hasCode ? 'code' : 'upload');
+  const fromRef = mode === 'code' ? ref || repo.data?.defaultBranch || '' : '';
 
   const createDraft = useMutation({
     mutationFn: () =>
       api<{ release: { id: string; version: string } }>(`/api/projects/${slug}/releases`, {
         method: 'POST',
-        body: JSON.stringify({ version, title, notes }),
+        body: JSON.stringify({ version, title, notes, ...(fromRef ? { ref: fromRef } : {}) }),
       }),
     onSuccess: (res) => {
+      if (fromRef) {
+        toast(`Draft v${res.release.version} holds the files from ${fromRef.length === 40 ? fromRef.slice(0, 7) : fromRef}; review and publish`);
+        navigate(`/p/${slug}/r/${res.release.version}`);
+        return;
+      }
       setReleaseId(res.release.id);
     },
     onError: (err) => toast(err instanceof ApiError ? err.message : 'Could not create the draft', 'err'),
@@ -87,7 +105,7 @@ export function NewReleasePage() {
   return (
     <div className="mx-auto max-w-4xl px-5 py-8 md:px-8 md:py-10">
       <Link
-        to={`/p/${slug}`}
+        to={`/p/${slug}/releases`}
         className="mb-5 inline-flex items-center gap-1.5 text-[12.5px] text-ink-3 transition-colors hover:text-ink-2"
       >
         <IconArrowLeft size={14} />
@@ -95,8 +113,42 @@ export function NewReleasePage() {
       </Link>
       <h1 className="mb-6 text-[22px] font-semibold tracking-[-0.02em]">New release</h1>
 
+      {releaseId === null && hasCode ? (
+        <div className="mb-5 max-w-xl space-y-2.5 rounded-xl border border-line bg-panel p-3.5 text-[12.5px]">
+          <label className="flex cursor-pointer items-center gap-2">
+            <input type="radio" checked={mode === 'code'} onChange={() => setSource('code')} className="accent-[#C9F24F]" />
+            Release the files of a branch, tag or commit
+          </label>
+          {mode === 'code' ? (
+            <div className="flex flex-wrap items-center gap-2 pl-6">
+              <Select value={fromRef} onChange={(e) => setRef(e.target.value)} className="font-mono" aria-label="Source ref">
+                {fromRef && !repo.data!.branches.some((b) => b.name === fromRef) && !repo.data!.tags.some((t) => t.name === fromRef) ? (
+                  <option value={fromRef}>{fromRef.slice(0, 7)}</option>
+                ) : null}
+                {repo.data!.branches.map((b) => (
+                  <option key={b.name} value={b.name}>
+                    {b.name}
+                  </option>
+                ))}
+                {repo.data!.tags.map((t) => (
+                  <option key={t.name} value={t.name}>
+                    {t.name}
+                  </option>
+                ))}
+              </Select>
+              <span className="text-ink-3">Publishing tags that commit with the version.</span>
+            </div>
+          ) : null}
+          <label className="flex cursor-pointer items-center gap-2">
+            <input type="radio" checked={mode === 'upload'} onChange={() => setSource('upload')} className="accent-[#C9F24F]" />
+            Upload files (huge assets, archives that unpack)
+          </label>
+        </div>
+      ) : null}
+
       {releaseId === null ? (
         <DraftForm
+          codeMode={mode === 'code'}
           version={version}
           setVersion={setVersion}
           title={title}
@@ -118,6 +170,7 @@ export function NewReleasePage() {
 }
 
 function DraftForm({
+  codeMode,
   version,
   setVersion,
   title,
@@ -128,6 +181,7 @@ function DraftForm({
   onSubmit,
   error,
 }: {
+  codeMode: boolean;
   version: string;
   setVersion: (v: string) => void;
   title: string;
@@ -176,7 +230,7 @@ function DraftForm({
       ) : null}
       <div>
         <Button type="submit" variant="primary" loading={busy}>
-          Create draft &amp; add files
+          {codeMode ? 'Create draft from code' : 'Create draft & add files'}
         </Button>
       </div>
     </form>
@@ -236,7 +290,7 @@ function UploadPhase({
     mutationFn: () => api(`/api/projects/${slug}/releases/${version}`, { method: 'DELETE' }),
     onSuccess: () => {
       toast('Draft discarded');
-      navigate(`/p/${slug}`);
+      navigate(`/p/${slug}/releases`);
     },
     onError: (err) => toast(err instanceof ApiError ? err.message : 'Could not discard', 'err'),
   });

@@ -1,6 +1,6 @@
 import { randomId } from './ids';
 
-const DELETE_BATCH = 90;
+const DELETE_BATCH = 45;
 
 export async function keyClaimedByOtherRelease(
   db: D1Database,
@@ -8,7 +8,10 @@ export async function keyClaimedByOtherRelease(
   releaseId: string,
 ): Promise<boolean> {
   const row = await db
-    .prepare('SELECT 1 FROM release_files WHERE r2_key = ? AND release_id != ? LIMIT 1')
+    .prepare(
+      `SELECT 1 FROM release_files WHERE r2_key = ?1 AND release_id != ?2
+       UNION ALL SELECT 1 FROM git_objects WHERE r2_key = ?1 LIMIT 1`,
+    )
     .bind(key, releaseId)
     .first();
   return row !== null;
@@ -38,9 +41,14 @@ export async function deleteUnreferencedObjects(
   const claimed = new Set<string>();
   for (let i = 0; i < unique.length; i += DELETE_BATCH) {
     const chunk = unique.slice(i, i + DELETE_BATCH);
+    const marks = chunk.map(() => '?').join(',');
+    // Git blobs imported from a release keep pointing at its R2 objects.
     const rows = await db
-      .prepare(`SELECT DISTINCT r2_key FROM release_files WHERE r2_key IN (${chunk.map(() => '?').join(',')})`)
-      .bind(...chunk)
+      .prepare(
+        `SELECT r2_key FROM release_files WHERE r2_key IN (${marks})
+         UNION SELECT r2_key FROM git_objects WHERE r2_key IN (${marks})`,
+      )
+      .bind(...chunk, ...chunk)
       .all<{ r2_key: string }>();
     for (const r of rows.results) claimed.add(r.r2_key);
   }

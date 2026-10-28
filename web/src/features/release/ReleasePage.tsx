@@ -29,6 +29,7 @@ type Release = {
   download_count: number;
   created_at: number;
   published_at: number | null;
+  commit_sha: string | null;
 };
 type FileRow = { id: string; path: string; size: number; digest: string | null; download_count: number };
 type ExtractPhase = 'download' | 'scan' | 'extract' | 'upload' | 'finish';
@@ -107,7 +108,7 @@ export function ReleasePage() {
     onSuccess: () => {
       toast(`v${version} deleted`);
       void qc.invalidateQueries({ queryKey: ['project', slug] });
-      navigate(`/p/${slug}`);
+      navigate(`/p/${slug}/releases`);
     },
     onError: (err) => toast(err instanceof ApiError ? err.message : 'Delete failed', 'err'),
   });
@@ -132,7 +133,7 @@ export function ReleasePage() {
   return (
     <div className="mx-auto max-w-4xl px-5 py-8 md:px-8 md:py-10">
       <Link
-        to={`/p/${slug}`}
+        to={`/p/${slug}/releases`}
         className="mb-5 inline-flex items-center gap-1.5 text-[12.5px] text-ink-3 transition-colors hover:text-ink-2"
       >
         <IconArrowLeft size={14} />
@@ -153,6 +154,14 @@ export function ReleasePage() {
             {files.length} files · {formatBytes(files.reduce((s, f) => s + f.size, 0))} · {release.download_count} downloads
             {release.digest ? ` · digest ${shortHash(release.digest)}` : ''}
           </p>
+          {release.commit_sha ? (
+            <p className="mt-1 font-mono text-[11.5px] text-ink-3">
+              from commit{' '}
+              <Link to={`/p/${slug}/commit/${release.commit_sha}`} className="text-ink-2 hover:text-accent">
+                {release.commit_sha.slice(0, 7)}
+              </Link>
+            </p>
+          ) : null}
         </div>
         <div className="flex shrink-0 flex-wrap items-center justify-end gap-2">
           {release.status === 'draft' && canUpload ? (

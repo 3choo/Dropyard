@@ -4,6 +4,7 @@ import {
   type SessionUser,
   SESSION_COOKIE,
   resolveSession,
+  resolveUserToken,
 } from './lib/auth';
 import { sha256Hex, nowMs } from './lib/ids';
 import { unauthorized, forbidden } from './lib/http';
@@ -14,7 +15,7 @@ export type AuthContext =
 
 export type AppEnv = { Bindings: Env; Variables: { auth: AuthContext } };
 
-async function resolveToken(env: Env, raw: string): Promise<AuthContext | null> {
+export async function resolveToken(env: Env, raw: string): Promise<AuthContext | null> {
   if (!raw.startsWith('gctx_')) return null;
   const hash = await sha256Hex(raw);
   const row = await env.DB
@@ -35,7 +36,10 @@ async function resolveToken(env: Env, raw: string): Promise<AuthContext | null> 
 async function resolveAny(env: Env, req: Request): Promise<AuthContext | null> {
   const authz = req.headers.get('authorization');
   if (authz?.startsWith('Bearer ')) {
-    const ctx = await resolveToken(env, authz.slice(7).trim());
+    const raw = authz.slice(7).trim();
+    const user = await resolveUserToken(env.DB, raw);
+    if (user) return { kind: 'session', user };
+    const ctx = await resolveToken(env, raw);
     if (ctx) return ctx;
   }
   const queryToken = new URL(req.url).searchParams.get('token');
