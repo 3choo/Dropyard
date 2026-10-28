@@ -34,6 +34,7 @@ import {
   validRefName,
   type CommitRow,
 } from '../git/repo';
+import { StarterError, getStarter, parseRange, presentStarter, startStarter, starterStep, starterStream } from '../git/starter';
 import { GitStore } from '../git/store';
 import { getProjectBySlug, type ProjectRow } from './projects';
 
@@ -400,4 +401,61 @@ repoRoutes.post('/:slug/repo/import/step', requireRole('admin', 'uploader'), asy
     if (err instanceof ImportError) throw badRequest(err.message);
     throw err;
   }
+});
+
+// ------------------------------------------------------------------ starter download
+
+repoRoutes.get('/:slug/repo/starter', requireSession(), async (c) => {
+  const { project } = await loadProject(c);
+  const head = await getRef(c.env.DB, project.id, `refs/heads/${project.default_branch}`);
+  return c.json({ starter: presentStarter(await getStarter(c.env.BUCKET, project.id)), head });
+});
+
+repoRoutes.post('/:slug/repo/starter', requireSession(), async (c) => {
+  const { project } = await loadProject(c);
+  try {
+    const state = await startStarter(c.env, project.id, project.default_branch, sessionUser(c).id);
+    await audit(c.env.DB, sessionUser(c).email, 'git.starter.start', `project:${project.slug}`);
+    return c.json({ starter: presentStarter(state) }, 201);
+  } catch (err) {
+    if (err instanceof StarterError) throw conflict(err.message);
+    throw err;
+  }
+});
+
+repoRoutes.post('/:slug/repo/starter/step', requireSession(), async (c) => {
+  const { project } = await loadProject(c);
+  try {
+    return c.json({ starter: presentStarter(await starterStep(c.env, project.id)) });
+  } catch (err) {
+    if (err instanceof StarterError) throw badRequest(err.message);
+    throw err;
+  }
+});
+
+repoRoutes.get('/:slug/repo/starter/download', requireSession(), async (c) => {
+  const { project } = await loadProject(c);
+  const state = await getStarter(c.env.BUCKET, project.id);
+  if (!state || state.status !== 'ready') throw notFound('The starter download is not ready yet');
+  const etag = `"${state.id}"`;
+  const ifRange = c.req.header('if-range');
+  const range = ifRange && ifRange !== etag ? null : parseRange(c.req.header('range'), state.size);
+  const headers = new Headers({
+    'content-type': 'application/x-git-bundle',
+    'content-disposition': `attachment; filename="${project.slug}.bundle"`,
+    'accept-ranges': 'bytes',
+    etag,
+    'cache-control': 'private, no-store',
+  });
+  if (range === 'invalid') {
+    headers.set('content-range', `bytes */${state.size}`);
+    return new Response(null, { status: 416, headers });
+  }
+  const start = range ? range.start : 0;
+  const end = range ? range.end : state.size - 1;
+  const body = await starterStream(c.env.BUCKET, project.id, state, start, end);
+  const { readable, writable } = new FixedLengthStream(end - start + 1);
+  c.executionCtx.waitUntil(body.pipeTo(writable).catch((err) => console.error('starter download failed', project.slug, err)));
+  if (range) headers.set('content-range', `bytes ${start}-${end}/${state.size}`);
+  return new Response(readable, { status: range ? 206 : 200, headers });
 });

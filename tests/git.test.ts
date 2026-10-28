@@ -1,8 +1,9 @@
-import { exports } from 'cloudflare:workers';
+import { env, exports } from 'cloudflare:workers';
 import { zlibSync } from 'fflate';
 import { beforeAll, describe, expect, it } from 'vitest';
 import { hashObject, serializeCommit, serializeTree, type ObjType } from '../src/git/objects';
 import { FLUSH, concatBytes, pkt } from '../src/git/pkt';
+import { getStarter, starterStep } from '../src/git/starter';
 
 /**
  * Git hosting: smart-HTTP auth, a hand-built pack pushed through
@@ -99,6 +100,12 @@ async function push(updates: { old: string; new: string; ref: string }[], object
 }
 
 const ZERO = '0'.repeat(40);
+
+function firstDiff(a: Uint8Array, b: Uint8Array): number {
+  if (a.length !== b.length) return Math.min(a.length, b.length);
+  for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return i;
+  return -1;
+}
 let firstCommit = '';
 
 beforeAll(async () => {
@@ -237,5 +244,58 @@ describe('pull requests', () => {
     expect(comment.res.status).toBe(201);
     const list = await call(`/api/projects/${slug}/issues?state=open`);
     expect(JSON.stringify(list.body)).toContain('Crash on spawn');
+  });
+});
+
+describe('starter download', () => {
+  it('builds a resumable bundle whose ranges stitch into a valid pack', async () => {
+    const big = new Uint8Array(9_000_000);
+    for (let i = 0; i < big.length; i += 65536) crypto.getRandomValues(big.subarray(i, i + 65536));
+    const sig = { name: 'Dev', email: 'dev@team.gg', time: 1_700_000_100, tz: '+0000' };
+    const bigBlob = await obj('blob', big);
+    const mid = await obj('blob', crypto.getRandomValues(new Uint8Array(65536)).slice(0, 65536));
+    const head = (await call(`/api/projects/${slug}/repo`)).body.head.sha as string;
+    const headCommit = await call(`/api/projects/${slug}/repo/tree?ref=main&path=`);
+    const entries = headCommit.body.entries.filter((e: { type: string }) => e.type === 'blob').map((e: { name: string; sha: string }) => ({ mode: '100644', name: e.name, sha: e.sha }));
+    const tree = await obj('tree', serializeTree([...entries, { mode: '100644', name: 'big.bin', sha: bigBlob.sha }, { mode: '100644', name: 'mid.bin', sha: mid.sha }]));
+    const commit = await obj('commit', serializeCommit({ tree: tree.sha, parents: [head], author: sig, committer: sig, message: 'Add assets' }));
+    const report = await push([{ old: ZERO, new: commit.sha, ref: 'refs/heads/assets' }], [bigBlob, mid, tree, commit]);
+    expect(report).toContain('ok refs/heads/assets');
+
+    const start = await call(`/api/projects/${slug}/repo/starter`, { method: 'POST' });
+    expect(start.res.status).toBe(201);
+    const project = await env.DB.prepare('SELECT id FROM projects WHERE slug = ?').bind(slug).first<{ id: string }>();
+    // A tiny byte budget forces a stop after every chunk, including mid-blob.
+    let steps = 0;
+    for (;;) {
+      const s = await starterStep(env, project!.id, 1);
+      steps++;
+      if (s.status !== 'building') break;
+    }
+    expect(steps).toBeGreaterThan(2);
+    const state = await getStarter(env.BUCKET, project!.id);
+    expect(state!.status).toBe('ready');
+
+    const fullRes = await worker.fetch(`${ORIGIN}/api/projects/${slug}/repo/starter/download`, { headers: { cookie: adminCookie } });
+    const bytes = new Uint8Array(await fullRes.arrayBuffer());
+    expect(bytes.length).toBe(state!.size);
+
+    const parts: Uint8Array[] = [];
+    for (let p = 0; p < bytes.length; p += 3_000_001) {
+      const res = await worker.fetch(`${ORIGIN}/api/projects/${slug}/repo/starter/download`, {
+        headers: { cookie: adminCookie, range: `bytes=${p}-${Math.min(bytes.length, p + 3_000_001) - 1}`, 'if-range': `"${state!.id}"` },
+      });
+      expect(res.status).toBe(206);
+      parts.push(new Uint8Array(await res.arrayBuffer()));
+    }
+    expect(firstDiff(concatBytes(parts), bytes)).toBe(-1);
+
+    const text = dec.decode(bytes.subarray(0, 400));
+    expect(text.startsWith('# v2 git bundle\n')).toBe(true);
+    expect(text).toContain(`${commit.sha} refs/heads/assets`);
+    const packAt = text.indexOf('\n\n') + 2;
+    const pack = bytes.subarray(packAt);
+    const digest = new Uint8Array(await crypto.subtle.digest('SHA-1', pack.subarray(0, pack.length - 20)));
+    expect(firstDiff(pack.subarray(pack.length - 20), digest)).toBe(-1);
   });
 });

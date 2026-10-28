@@ -129,7 +129,7 @@ export function ProjectLayout() {
           ) : null}
         </div>
         <div className="flex shrink-0 items-center gap-2">
-          {repo.data ? <CloneButton cloneUrl={repo.data.cloneUrl} /> : null}
+          {repo.data ? <CloneButton cloneUrl={repo.data.cloneUrl} slug={slug} /> : null}
           {canUpload ? (
             <Button variant="secondary" onClick={() => setSettingsOpen(true)} aria-label="Project settings">
               <IconSettings size={14} />

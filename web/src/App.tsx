@@ -8,6 +8,7 @@ import { ProjectLayout, ReleasesTab } from './features/project/ProjectPage';
 import { CodeTab } from './features/repo/CodeTab';
 import { BlobPage, EditPage } from './features/repo/BlobPage';
 import { BranchesPage, CommitPage, CommitsTab, ComparePage } from './features/repo/History';
+import { StarterPage } from './features/repo/StarterPage';
 import { IssueList, IssuePage, NewIssuePage } from './features/collab/Issues';
 import { TokensPage } from './features/settings/TokensPage';
 import { ReleasePage } from './features/release/ReleasePage';
@@ -81,6 +82,7 @@ const router = createBrowserRouter([
           { path: 'commit/:sha', element: <CommitPage /> },
           { path: 'compare', element: <ComparePage /> },
           { path: 'branches', element: <BranchesPage /> },
+          { path: 'starter', element: <StarterPage /> },
           { path: 'pulls', element: <IssueList kind="pull" /> },
           { path: 'pulls/:number', element: <IssuePage kind="pull" /> },
           { path: 'issues', element: <IssueList kind="issue" /> },

@@ -4,7 +4,7 @@ import { Button, CopyButton } from '../../components/ui';
 import { IconChevronDown, IconCode } from '../../components/icons';
 
 /** GitHub's green "Code" button: clone URL plus an Open-in-GitHub-Desktop link. */
-export function CloneButton({ cloneUrl }: { cloneUrl: string }) {
+export function CloneButton({ cloneUrl, slug }: { cloneUrl: string; slug: string }) {
   const [open, setOpen] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
   useEffect(() => {
@@ -54,6 +54,17 @@ export function CloneButton({ cloneUrl }: { cloneUrl: string }) {
           >
             Open with GitHub Desktop
           </a>
+          <p className="mt-2.5 text-[11.5px] leading-relaxed text-ink-3">
+            Many GB?{' '}
+            <Link
+              to={`/p/${slug}/starter`}
+              onClick={() => setOpen(false)}
+              className="text-ink-2 underline decoration-line-2 underline-offset-2 hover:text-ink"
+            >
+              Use the resumable starter download
+            </Link>{' '}
+            for the first copy.
+          </p>
         </div>
       ) : null}
     </div>

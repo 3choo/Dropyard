@@ -121,7 +121,10 @@ commits, oldest first, without copying any file data in R2.
 Limits worth knowing: Cloudflare caps a request body at 100 MB on the Free and
 Pro plans (500 MB on Business), so a single push must stay under that. Push
 large changes in several commits. The very first clone of an imported project
-downloads the whole library, which can be many GB.
+downloads the whole library, which can be many GB, and Git cannot resume a
+broken clone. For those, use **Clone → resumable starter download**: the panel
+prepares a git bundle you download in the browser (with resume), clone from it
+locally, then point `origin` back at gitctx so later fetches are small.
 
 ### Custom domain later
 

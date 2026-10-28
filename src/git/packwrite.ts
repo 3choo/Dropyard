@@ -17,7 +17,7 @@ const AHEAD_ENTRIES = 48;
 const AHEAD_BYTES = 32 * MB;
 const STORED_BLOCK = 65535;
 
-function entryHeader(type: ObjType, size: number): Uint8Array {
+export function entryHeader(type: ObjType, size: number): Uint8Array {
   const bytes: number[] = [];
   let b = (TYPE_CODE[type] << 4) | (size & 0x0f);
   let rest = Math.floor(size / 16);
@@ -30,7 +30,7 @@ function entryHeader(type: ObjType, size: number): Uint8Array {
   return Uint8Array.from(bytes);
 }
 
-function adler32(prev: number, data: Uint8Array): number {
+export function adler32(prev: number, data: Uint8Array): number {
   let a = prev & 0xffff;
   let b = prev >>> 16;
   let i = 0;
@@ -81,7 +81,7 @@ class StoredZlib {
 
 const EMPTY_STORED = Uint8Array.from([0x78, 0x01, 0x01, 0x00, 0x00, 0xff, 0xff, 0x00, 0x00, 0x00, 0x01]);
 
-function* encodeInMemory(type: ObjType, data: Uint8Array, compress: boolean): Generator<Uint8Array> {
+export function* encodeInMemory(type: ObjType, data: Uint8Array, compress: boolean): Generator<Uint8Array> {
   yield entryHeader(type, data.length);
   if (data.length === 0) {
     yield EMPTY_STORED;
