@@ -1,5 +1,3 @@
-/.zcode
-/.impeccable
 node_modules/
 web/dist/
 .wrangler/
