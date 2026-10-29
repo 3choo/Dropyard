@@ -26,7 +26,7 @@ app.use('/api/*', async (c, next) => {
   c.header('referrer-policy', 'strict-origin-when-cross-origin');
 });
 
-app.get('/api/health', (c) => c.json({ ok: true, name: 'gitctx' }));
+app.get('/api/health', (c) => c.json({ ok: true, name: 'dropyard' }));
 
 app.route('/api/auth', authRoutes);
 app.route('/api/projects', projectRoutes);

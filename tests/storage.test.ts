@@ -31,12 +31,12 @@ describe('s3Config', () => {
   it('falls back to the legacy R2_* names', () => {
     const cfg = s3Config({
       R2_S3_ACCOUNT_ID: 'acct',
-      R2_BUCKET_NAME: 'gitctx',
+      R2_BUCKET_NAME: 'dropyard',
       R2_ACCESS_KEY_ID: 'a',
       R2_SECRET_ACCESS_KEY: 'b',
     } as never)!;
     expect(cfg.endpoint).toBe('https://acct.r2.cloudflarestorage.com');
-    expect(cfg.bucket).toBe('gitctx');
+    expect(cfg.bucket).toBe('dropyard');
   });
 
   it('returns null without credentials', () => {

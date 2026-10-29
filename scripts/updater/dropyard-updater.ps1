@@ -1,6 +1,6 @@
 <#
 .SYNOPSIS
-  Pull the latest release of a gitctx project onto a FiveM server.
+  Pull the latest release of a dropyard project onto a FiveM server.
 
 .DESCRIPTION
   Polls the version check endpoint, and only when the digest changed, downloads
@@ -10,7 +10,7 @@
   Run it from a scheduled task, txAdmin scheduler batch, or by hand.
 
 .PARAMETER BaseUrl
-  Your gitctx origin, e.g. https://gitctx.yourteam.workers.dev
+  Your dropyard origin, e.g. https://dropyard.yourteam.workers.dev
 
 .PARAMETER Token
   A deploy token (Admin -> Deploy tokens). gctx_...
@@ -22,7 +22,7 @@
   Local folder that receives the files. Created if missing.
 
 .EXAMPLE
-  .\gitctx-updater.ps1 -BaseUrl https://gitctx.example.workers.dev `
+  .\dropyard-updater.ps1 -BaseUrl https://dropyard.example.workers.dev `
       -Token gctx_xxx -Slug server-artifacts -Dest C:\fxserver\artifacts
 #>
 param(
@@ -40,7 +40,7 @@ $H = @{ Authorization = "Bearer $Token" }
 try {
   $check = Invoke-RestMethod "$BaseUrl/api/projects/$Slug/releases/latest/check" -Headers $H
 } catch {
-  Write-Host "gitctx: cannot reach $BaseUrl ($($_.Exception.Message))" -ForegroundColor Red
+  Write-Host "dropyard: cannot reach $BaseUrl ($($_.Exception.Message))" -ForegroundColor Red
   exit 1
 }
 
@@ -50,11 +50,11 @@ if (Test-Path $stateFile) {
 }
 
 if (-not $Force -and $known -eq $check.digest) {
-  Write-Host "gitctx: $Slug already at v$($check.version)"
+  Write-Host "dropyard: $Slug already at v$($check.version)"
   exit 0
 }
 
-Write-Host "gitctx: pulling v$($check.version) of $Slug..."
+Write-Host "dropyard: pulling v$($check.version) of $Slug..."
 $rel = Invoke-RestMethod "$BaseUrl/api/projects/$Slug/releases/latest" -Headers $H
 New-Item -ItemType Directory -Force $Dest | Out-Null
 
@@ -68,4 +68,4 @@ foreach ($f in $rel.files) {
 @{ version = $rel.version; digest = $rel.digest; pulledAt = (Get-Date -Format o) } |
   ConvertTo-Json | Set-Content $stateFile
 
-Write-Host "gitctx: $Slug is now at v$($rel.version) — restart the server if resources changed." -ForegroundColor Green
+Write-Host "dropyard: $Slug is now at v$($rel.version) — restart the server if resources changed." -ForegroundColor Green

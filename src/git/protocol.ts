@@ -11,7 +11,7 @@ import { readPack } from './packread';
 import { ByteReader } from './stream';
 import { getBucket } from '../lib/storage';
 
-const AGENT = 'agent=gitctx/1';
+const AGENT = 'agent=dropyard/1';
 
 export type RepoInfo = { projectId: string; defaultBranch: string; protectDefault: boolean };
 
@@ -229,7 +229,7 @@ function packResponse(store: GitStore, entries: PackEntry[], prefix: Uint8Array[
       } catch (err) {
         console.error('pack stream failed', err);
         if (useSideband) {
-          for (const framed of sideband(3, `gitctx: ${err instanceof Error ? err.message : 'pack failed'}\n`)) controller.enqueue(framed);
+          for (const framed of sideband(3, `dropyard: ${err instanceof Error ? err.message : 'pack failed'}\n`)) controller.enqueue(framed);
           controller.close();
         } else controller.error(err);
       }
@@ -279,7 +279,7 @@ export async function uploadPackV2(store: GitStore, repo: RepoInfo, body: Uint8A
     const haves = args.filter((a) => a.startsWith('have ')).map((a) => a.slice(5).trim());
     const done = args.includes('done');
     if (args.some((a) => a.startsWith('shallow ') || a.startsWith('deepen'))) {
-      throw new GitProtocolError('shallow clones are not supported by gitctx');
+      throw new GitProtocolError('shallow clones are not supported by dropyard');
     }
     if (wants.some((w) => !SHA_RE.test(w))) throw new GitProtocolError('invalid want');
     const known = await store.has([...wants, ...haves]);
@@ -321,7 +321,7 @@ export async function uploadPackV0(store: GitStore, body: Uint8Array): Promise<R
     } else if (line.startsWith('have ')) haves.push(line.slice(5).trim());
     else if (line === 'done') done = true;
     else if (line.startsWith('shallow ') || line.startsWith('deepen')) {
-      throw new GitProtocolError('shallow clones are not supported by gitctx');
+      throw new GitProtocolError('shallow clones are not supported by dropyard');
     }
   }
   if (!done) return streamOf([pkt('NAK\n')]);

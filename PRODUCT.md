@@ -16,7 +16,7 @@ A small FiveM server dev team (the owner plus teammates) with three roles: admin
 
 ## Product Purpose
 
-gitctx is the team's private GitHub replacement for server content: upload resources, MLOs/maps, vehicles, full server builds, and configs; every upload becomes an immutable versioned release with notes; any release can be browsed, downloaded, or rolled back to. Success means: a multi-GB MLO uploads reliably from a browser without starting over, and the game server always runs the release the team chose — pulled automatically over a stable, token-authenticated URL.
+dropyard is the team's private GitHub replacement for server content: upload resources, MLOs/maps, vehicles, full server builds, and configs; every upload becomes an immutable versioned release with notes; any release can be browsed, downloaded, or rolled back to. Success means: a multi-GB MLO uploads reliably from a browser without starting over, and the game server always runs the release the team chose — pulled automatically over a stable, token-authenticated URL.
 
 ## Positioning
 
@@ -45,7 +45,7 @@ Confirmed:
 
 ## Brand Commitments
 
-- Name: gitctx (user confirmed by accepting the "Both-ready" deployment option; no other name offered).
+- Name: dropyard (user confirmed by accepting the "Both-ready" deployment option; no other name offered).
 - User-pinned visual world: dark developer aesthetic — deep charcoal base, one vivid accent, code-inspired mono details, glass/depth layers; modern and clean, with purposeful animation. Binding; see DESIGN.md at finish and the surface brief's direction contract.
 
 ## Evidence on Hand

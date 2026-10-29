@@ -549,7 +549,7 @@ async function runRarExtraction(
       secret,
       r2: s3Config(env),
     };
-    const res = await runner.fetch('http://gitctx-extract/extract', {
+    const res = await runner.fetch('http://dropyard-extract/extract', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify(payload),

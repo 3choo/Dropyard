@@ -240,7 +240,7 @@ async function finishRelease(
     files.results.map((f) => ({ path: f.path, sha: f.sha, mode: MODE_FILE })),
   );
   const when = Math.floor((release.published_at ?? release.created_at) / 1000);
-  const author = { name: release.name ?? 'gitctx', email: release.email ?? 'gitctx@localhost', time: when, tz: '+0000' };
+  const author = { name: release.name ?? 'dropyard', email: release.email ?? 'dropyard@localhost', time: when, tz: '+0000' };
   const subject = release.title ? `v${release.version}: ${release.title}` : `Release v${release.version}`;
   const sha = await createCommit(store, {
     tree,

@@ -1,4 +1,4 @@
-# gitctx
+# dropyard
 
 Your team's private GitHub replacement for FiveM server content — a Cloudflare
 Worker + R2 + D1 app where a small team uploads resources, MLOs, vehicles and
@@ -24,7 +24,7 @@ pulls them over stable, token-authenticated URLs.
 Requirements: a Cloudflare account (Workers, D1 and, for the default setup, R2), Node 20+, and Docker only if you want `.rar` unpacking.
 
 ```bash
-git clone https://github.com/3choo/gitctx.git && cd gitctx
+git clone https://github.com/3choo/dropyard.git && cd dropyard
 npm install
 npx wrangler login
 npm run setup      # creates the bucket + D1 database, writes wrangler.local.jsonc, stores secrets, applies CORS + migrations
@@ -41,7 +41,7 @@ it exists and fall back to the committed `wrangler.jsonc` template.
 
 ## Storage backends
 
-gitctx stores release files and Git blobs in object storage. Two modes:
+dropyard stores release files and Git blobs in object storage. Two modes:
 
 | Mode | When | Config |
 | ---- | ---- | ------ |
@@ -66,13 +66,13 @@ For R2 the older `R2_S3_ACCOUNT_ID`, `R2_BUCKET_NAME`, `R2_ACCESS_KEY_ID` and
 `R2_SECRET_ACCESS_KEY` names still work and are used when no `S3_*` value is set.
 
 Whatever the backend, the browser uploads big files straight to the bucket
-with presigned URLs, so the bucket needs a **CORS rule** for your gitctx
+with presigned URLs, so the bucket needs a **CORS rule** for your dropyard
 origin (methods `GET`, `PUT`, `HEAD`; expose the `ETag` header). The setup
 script applies it for R2 and prints the JSON for other providers. For R2 the
 template is [`r2-cors.json`](r2-cors.json):
 
 ```bash
-npx wrangler r2 bucket cors put gitctx --file r2-cors.json
+npx wrangler r2 bucket cors put dropyard --file r2-cors.json
 ```
 
 Non-R2 backends buffer single-request uploads (up to `MAX_SINGLE_UPLOAD_MB`)
@@ -96,7 +96,7 @@ npx wrangler secret put EXTRACT_CALLBACK_SECRET   # any long random string
 Then apply the v2 migration once:
 
 ```bash
-npx wrangler d1 migrations apply gitctx --remote
+npx wrangler d1 migrations apply dropyard --remote
 ```
 
 How it behaves:
@@ -116,7 +116,7 @@ How it behaves:
 
 ### Using GitHub Desktop
 
-1. In gitctx, open **Access tokens** (sidebar) and create a token for this
+1. In dropyard, open **Access tokens** (sidebar) and create a token for this
    computer. Copy it; it is shown once.
 2. Open a project and press **Clone** to copy its URL
    (`https://<your-host>/git/<project>.git`), or press **Open in GitHub
@@ -139,7 +139,7 @@ large changes in several commits. The very first clone of an imported project
 downloads the whole library, which can be many GB, and Git cannot resume a
 broken clone. For those, use **Clone → resumable starter download**: the panel
 prepares a git bundle you download in the browser (with resume), clone from it
-locally, then point `origin` back at gitctx so later fetches are small.
+locally, then point `origin` back at dropyard so later fetches are small.
 
 ### Custom domain later
 
@@ -170,7 +170,7 @@ Copy [`scripts/updater/`](scripts/updater/) to the server.
 PowerShell (Windows / txAdmin):
 
 ```powershell
-.\gitctx-updater.ps1 -BaseUrl https://gitctx.yourteam.workers.dev `
+.\dropyard-updater.ps1 -BaseUrl https://dropyard.yourteam.workers.dev `
   -Token gctx_xxx -Slug server-artifacts -Dest C:\fxserver\artifacts
 ```
 
@@ -179,13 +179,13 @@ script with the origin and slug baked in:
 
 ```bash
 curl -fsSL -H "Authorization: Bearer gctx_xxx" \
-  https://gitctx.yourteam.workers.dev/dl/server-artifacts/pull.sh | DEST=/srv/fxserver/resources bash
+  https://dropyard.yourteam.workers.dev/dl/server-artifacts/pull.sh | DEST=/srv/fxserver/resources bash
 ```
 
 It mirrors the release: only new or changed files are downloaded, files the
 previous release had but this one dropped are deleted, and anything else in
 `DEST` is left alone (state lives in `DEST/.gitctx/`). `FORCE=1` re-downloads
-everything. [`gitctx-updater.sh`](scripts/updater/gitctx-updater.sh) wraps the
+everything. [`dropyard-updater.sh`](scripts/updater/dropyard-updater.sh) wraps the
 same thing with env vars for cron.
 
 Whole release as one file: `GET /dl/<slug>/latest?format=zip` streams a zip
@@ -222,7 +222,7 @@ parts are listed from R2 on resume.
 
 Archives take a detour on completion: a `.zip` is stream-extracted inside the
 Worker (fflate, entries written straight back to R2), while a `.rar` is handed
-to the `gitctx-extract` container (7-Zip), which downloads the volume set from
+to the `dropyard-extract` container (7-Zip), which downloads the volume set from
 R2, unpacks, uploads each file and reports progress back over
 `/api/internal/extract`.
 
@@ -236,7 +236,7 @@ held in memory.
 ## Upgrading an existing deployment
 
 ```bash
-npx wrangler d1 migrations apply gitctx --remote   # adds 0004_git and 0005_collab
+npx wrangler d1 migrations apply dropyard --remote   # adds 0004_git and 0005_collab
 npm run deploy
 ```
 
@@ -268,5 +268,5 @@ pull request. Report vulnerabilities privately, see [SECURITY.md](SECURITY.md).
 
 ## Contributing and license
 
-See [CONTRIBUTING.md](CONTRIBUTING.md). gitctx is released under the
+See [CONTRIBUTING.md](CONTRIBUTING.md). dropyard is released under the
 [MIT license](LICENSE).

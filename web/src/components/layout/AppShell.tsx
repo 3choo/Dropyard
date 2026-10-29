@@ -21,7 +21,7 @@ function Logo() {
         />
         <rect x="17" y="19" width="7" height="3" rx="1.5" fill="#131608" />
       </svg>
-      <span className="text-[15px] font-semibold tracking-[-0.02em]">gitctx</span>
+      <span className="text-[15px] font-semibold tracking-[-0.02em]">dropyard</span>
     </div>
   );
 }

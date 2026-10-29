@@ -1,4 +1,4 @@
--- gitctx v4: every project is also a Git repository (smart HTTP, so GitHub
+-- dropyard v4: every project is also a Git repository (smart HTTP, so GitHub
 -- Desktop can clone/push/pull), plus personal access tokens for git auth.
 
 ALTER TABLE projects ADD COLUMN default_branch TEXT NOT NULL DEFAULT 'main';

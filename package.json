@@ -1,5 +1,5 @@
 {
-  "name": "gitctx",
+  "name": "dropyard",
   "private": true,
   "license": "MIT",
   "description": "Self-hosted release and Git panel for FiveM server content on Cloudflare Workers",
@@ -13,7 +13,7 @@
     "typecheck": "tsc --noEmit -p tsconfig.worker.json && tsc --noEmit -p web/tsconfig.json",
     "test": "vitest run",
     "cf-typegen": "wrangler types",
-    "migrate:remote": "node scripts/wrangler.mjs d1 migrations apply gitctx --remote"
+    "migrate:remote": "node scripts/wrangler.mjs d1 migrations apply dropyard --remote"
   },
   "dependencies": {
     "@cloudflare/containers": "^0.3.7",

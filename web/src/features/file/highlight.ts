@@ -1,13 +1,13 @@
 import { createHighlighter, type BundledLanguage, type Highlighter, type ThemeRegistrationRaw } from 'shiki';
 
 /**
- * A Shiki theme authored from the gitctx design tokens: charcoal panels, ink
+ * A Shiki theme authored from the dropyard design tokens: charcoal panels, ink
  * text, and the product's state palette doing syntax duty — chartreuse for
  * keywords, amber for constants, info blue for names, muted chartreuse for
  * strings. Restrained on purpose: the console stays legible, not neon.
  */
 export const consoleTheme: ThemeRegistrationRaw = {
-  name: 'gitctx-console',
+  name: 'dropyard-console',
   type: 'dark',
   colors: {
     'editor.background': '#12151A',

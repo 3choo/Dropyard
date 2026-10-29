@@ -1,4 +1,4 @@
--- gitctx v5: issues, pull requests, reviews and comments (GitHub-style).
+-- dropyard v5: issues, pull requests, reviews and comments (GitHub-style).
 
 -- When set, the default branch only changes through approved pull requests:
 -- direct pushes and browser commits to it are refused.

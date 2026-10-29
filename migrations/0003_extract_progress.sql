@@ -1,4 +1,4 @@
--- gitctx schema v3: live unpack progress + console log.
+-- dropyard schema v3: live unpack progress + console log.
 -- The extraction container (and the in-Worker zip path) report phase changes
 -- and byte counters as the job runs, so the release page can render a progress
 -- bar with an ETA. extract_log is a ring buffer of console lines shown in a

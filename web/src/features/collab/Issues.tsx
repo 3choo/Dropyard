@@ -340,7 +340,7 @@ export function IssuePage({ kind }: { kind: Kind }) {
     const text =
       e.kind === 'merged'
         ? e.meta?.external
-          ? 'This pull request was merged from outside gitctx (pushed directly)'
+          ? 'This pull request was merged from outside dropyard (pushed directly)'
           : `${who} merged this (${String(e.meta?.method ?? 'merge')}) as ${String(e.meta?.commit ?? '').slice(0, 7)}`
         : e.kind === 'closed'
           ? `${who} closed this`

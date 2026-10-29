@@ -1,4 +1,4 @@
-# gitctx extraction container: real unrar-grade RAR support via 7-Zip.
+# dropyard extraction container: real unrar-grade RAR support via 7-Zip.
 # Built by `wrangler deploy` from this directory (Docker must be running).
 
 FROM node:22-slim

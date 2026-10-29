@@ -15,7 +15,7 @@ export default function CodeView({ path, code }: { path: string; code: string })
   const highlighter = use(getHighlighter());
   const lang = langForPath(path);
   const html = lang
-    ? highlighter.codeToHtml(code, { lang, theme: 'gitctx-console' })
+    ? highlighter.codeToHtml(code, { lang, theme: 'dropyard-console' })
     : plainHtml(code);
   return (
     <div className="codeview" dangerouslySetInnerHTML={{ __html: html }} />

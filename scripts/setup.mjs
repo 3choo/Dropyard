@@ -15,7 +15,7 @@ const run = (args, input) =>
   });
 
 const OUT = 'wrangler.local.jsonc';
-console.log('gitctx setup — requires `npx wrangler login` to have been run.\n');
+console.log('dropyard setup — requires `npx wrangler login` to have been run.\n');
 
 if (existsSync(OUT) && (await ask(`${OUT} exists. Overwrite?`, 'n')).toLowerCase() !== 'y') {
   console.log('Keeping existing config. Delete it to start over.');
@@ -24,8 +24,8 @@ if (existsSync(OUT) && (await ask(`${OUT} exists. Overwrite?`, 'n')).toLowerCase
 
 const backend = (await ask('Storage backend: r2 (Cloudflare R2) or s3 (AWS S3, MinIO, Backblaze, ...)', 'r2')).toLowerCase();
 const isS3 = backend === 's3';
-const bucket = await ask('Bucket name', 'gitctx');
-const dbName = await ask('D1 database name', 'gitctx');
+const bucket = await ask('Bucket name', 'dropyard');
+const dbName = await ask('D1 database name', 'dropyard');
 
 let cfg = readFileSync('wrangler.jsonc', 'utf8');
 const setVar = (name, value) => {

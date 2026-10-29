@@ -7,7 +7,7 @@ function shQuote(value: string): string {
 }
 
 const SCRIPT = String.raw`#!/usr/bin/env bash
-# gitctx pull: mirror the latest published release into a folder.
+# dropyard pull: mirror the latest published release into a folder.
 #   DEST      target folder (default: first argument, else the current directory)
 #   FORCE=1   re-download every file, even unchanged ones
 #   PARALLEL  concurrent downloads (default 128; curl caps it at 300)
@@ -24,7 +24,7 @@ PARALLEL=${'$'}{PARALLEL:-128}
 [ "${'$'}{DEBUG:-0}" = 1 ] && set -x
 
 started=$SECONDS
-log() { printf '[gitctx %4ds] %s\n' "$((SECONDS - started))" "$*"; }
+log() { printf '[dropyard %4ds] %s\n' "$((SECONDS - started))" "$*"; }
 die() { log "ERROR: $*" >&2; exit 1; }
 human() {
   awk -v b="$1" 'BEGIN { split("B KB MB GB TB", u); i = 1
@@ -109,7 +109,7 @@ seen=0
 queue() {
   local enc=$1 size=$2 path
   printf -v path '%b' "${'$'}{enc//%/\\x}"
-  safe_path "$path" || { echo "gitctx: skipping unsafe path $enc" >&2; return 0; }
+  safe_path "$path" || { echo "dropyard: skipping unsafe path $enc" >&2; return 0; }
   printf '%s\n' "$enc"
   printf '%s\n' "$path" >&3
   count=$((count + 1))
@@ -127,7 +127,7 @@ emit() {
 tick() {
   seen=$((seen + 1))
   if [ $((seen % 2000)) -eq 0 ]; then
-    printf '\r[gitctx %4ds] checking files: %d/%d' "$((SECONDS - started))" "$seen" "$total_files" >&2
+    printf '\r[dropyard %4ds] checking files: %d/%d' "$((SECONDS - started))" "$seen" "$total_files" >&2
   fi
 }
 

@@ -575,7 +575,7 @@ projectRoutes.post('/:slug/releases/:version/publish', requireRole('admin', 'upl
       title: `${project.name} — v${release.version}`,
       description: (release.notes || release.title || 'New release published.').slice(0, 500),
       color: 0xc9f24f,
-      footer: { text: `gitctx · ${project.slug}` },
+      footer: { text: `dropyard · ${project.slug}` },
     };
     c.executionCtx.waitUntil(
       fetch(webhook.value, {

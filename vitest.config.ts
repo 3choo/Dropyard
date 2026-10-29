@@ -6,9 +6,9 @@ export default defineConfig({
     cloudflareTest({
       wrangler: { configPath: './wrangler.jsonc' },
       // miniflare 5 betas bind R2 buckets by bucket name; remap to the
-      // binding name our Worker expects (BUCKET -> bucket "gitctx").
+      // binding name our Worker expects (BUCKET -> bucket "dropyard").
       miniflare: {
-        r2Buckets: { BUCKET: 'gitctx' },
+        r2Buckets: { BUCKET: 'dropyard' },
         // Test-only callback secret so container→Worker events can be exercised
         // without touching real dev secrets (.dev.vars stays absent locally).
         bindings: { EXTRACT_CALLBACK_SECRET: 'test-extract-secret' },

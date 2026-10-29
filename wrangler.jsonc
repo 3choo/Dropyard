@@ -1,6 +1,6 @@
 {
   "$schema": "node_modules/wrangler/config-schema.json",
-  "name": "gitctx",
+  "name": "dropyard",
   "main": "src/index.ts",
   "compatibility_date": "2026-10-24",
   "compatibility_flags": ["nodejs_compat"],
@@ -17,12 +17,12 @@
     "run_worker_first": ["/api/*", "/dl/*", "/git/*"]
   },
 
-  "r2_buckets": [{ "binding": "BUCKET", "bucket_name": "gitctx" }],
+  "r2_buckets": [{ "binding": "BUCKET", "bucket_name": "dropyard" }],
 
   "d1_databases": [
     {
       "binding": "DB",
-      "database_name": "gitctx",
+      "database_name": "dropyard",
       "database_id": "00000000-0000-0000-0000-000000000000"
     }
   ],
@@ -34,7 +34,7 @@
   // instance_type_custom yet — predefined types only.)
   "containers": [
     {
-      "name": "gitctx-extract",
+      "name": "dropyard-extract",
       "class_name": "ExtractRunner",
       "image": "./container/Dockerfile",
       "image_build_context": "./container",
@@ -53,7 +53,7 @@
 
   "vars": {
     "R2_S3_ACCOUNT_ID": "",
-    "R2_BUCKET_NAME": "gitctx",
+    "R2_BUCKET_NAME": "dropyard",
     "MAX_SINGLE_UPLOAD_MB": "90",
     "MAX_UNPACK_FILES": "200000",
     "MAX_UNPACK_FILE_MB": "20480",

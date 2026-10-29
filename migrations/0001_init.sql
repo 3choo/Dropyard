@@ -1,4 +1,4 @@
--- gitctx schema v1
+-- dropyard schema v1
 CREATE TABLE users (
   id TEXT PRIMARY KEY,
   email TEXT NOT NULL UNIQUE,

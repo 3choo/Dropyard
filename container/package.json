@@ -1,5 +1,5 @@
 {
-  "name": "gitctx-extract",
+  "name": "dropyard-extract",
   "private": true,
   "type": "module",
   "dependencies": {

@@ -1,5 +1,5 @@
 ---
-name: gitctx
+name: dropyard
 description: Private release hub for a FiveM server team — a dark developer instrument console for multi-GB uploads.
 colors:
   ground: "#0C0E11"
@@ -78,13 +78,13 @@ components:
     height: "32px"
 ---
 
-# Design System: gitctx
+# Design System: dropyard
 
 ## Overview
 
 **Creative North Star: "The Instrument Console"**
 
-gitctx treats a six-gigabyte upload as routine. The interface is a dark developer console where the transfer itself is visible: every measured value — bytes, versions, digests, throughput — sits in tabular mono type like a readout, and the accent color behaves like an instrument's active trace, marking only what is live, current, or actionable. Nothing glows, nothing decorates; depth comes from layered charcoal surfaces and one glass surface reserved for command.
+dropyard treats a six-gigabyte upload as routine. The interface is a dark developer console where the transfer itself is visible: every measured value — bytes, versions, digests, throughput — sits in tabular mono type like a readout, and the accent color behaves like an instrument's active trace, marking only what is live, current, or actionable. Nothing glows, nothing decorates; depth comes from layered charcoal surfaces and one glass surface reserved for command.
 
 The density is deliberately compact: 13px body text, tight rows, hairline separators, a left rail that anchors navigation and a storage meter. The user pinned this world ("dark developer"), and the build commits to it — chartreuse at real weight on primary actions, selection, and progress, never scattered as ornament.
 

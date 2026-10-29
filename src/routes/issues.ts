@@ -202,7 +202,7 @@ function reviewTally(reviews: { author_id: string | null; state: string }[], prA
   };
 }
 
-/** A PR merged outside gitctx (pushed from GitHub Desktop) is marked merged when seen. */
+/** A PR merged outside dropyard (pushed from GitHub Desktop) is marked merged when seen. */
 async function syncMergedElsewhere(db: D1Database, pr: IssueRow, status: PullStatus): Promise<IssueRow> {
   if (pr.state !== 'open' || status.branchMissing || !status.headSha || !status.baseSha || status.ahead > 0) return pr;
   if (!(await isAncestor(db, pr.project_id, status.headSha, status.baseSha))) return pr;

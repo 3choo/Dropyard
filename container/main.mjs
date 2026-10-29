@@ -1,4 +1,4 @@
-// gitctx extraction container.
+// dropyard extraction container.
 //
 // The Worker wakes one instance of this container per RAR extract job and POSTs
 // the job payload to /extract. The container downloads the RAR volume set from
@@ -246,7 +246,7 @@ function parseListing(stdout) {
 
 async function runJob(payload) {
   const { jobId, volumes, prefix, caps, r2 } = payload;
-  const work = join(tmpdir(), `gitctx-${jobId}`);
+  const work = join(tmpdir(), `dropyard-${jobId}`);
   const vols = join(work, 'volumes');
   const client = new AwsClient({
     accessKeyId: r2.accessKeyId,

@@ -233,7 +233,7 @@ function EmptyRepo({ repo, onImported, canUpload }: { repo: RepoSummary; onImpor
           <li>
             In GitHub Desktop: <span className="text-ink">File → Clone repository → URL</span>, paste the URL below.
           </li>
-          <li>When it asks to sign in, use your gitctx email as the username and the token as the password.</li>
+          <li>When it asks to sign in, use your dropyard email as the username and the token as the password.</li>
           <li>Add files, commit, and press <span className="text-ink">Publish branch</span>.</li>
         </ol>
         <div className="mt-4 flex items-center gap-1 rounded-lg border border-line bg-ground pl-3">

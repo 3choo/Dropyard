@@ -462,13 +462,13 @@ describe('R2 presigned downloads', () => {
   it('signs a short-lived GET for the object key', async () => {
     const s3 = new S3Storage({
       S3_ENDPOINT: "https://acct.r2.cloudflarestorage.com",
-      R2_BUCKET_NAME: 'gitctx',
+      R2_BUCKET_NAME: 'dropyard',
       R2_ACCESS_KEY_ID: 'AKIDEXAMPLE',
       R2_SECRET_ACCESS_KEY: 'secret',
     } as unknown as Env);
     const url = new URL(await s3.presignGet('p/x/r/y/stream/a b.ytd'));
     expect(url.origin).toBe('https://acct.r2.cloudflarestorage.com');
-    expect(url.pathname).toBe('/gitctx/p/x/r/y/stream/a%20b.ytd');
+    expect(url.pathname).toBe('/dropyard/p/x/r/y/stream/a%20b.ytd');
     expect(url.searchParams.get('X-Amz-Expires')).toBe('900');
     expect(url.searchParams.get('X-Amz-Signature')).toMatch(/^[0-9a-f]{64}$/);
   });

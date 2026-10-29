@@ -3,7 +3,7 @@ import { AwsClient } from 'aws4fetch';
 /**
  * Object storage configuration.
  *
- * gitctx talks to storage two ways: through the Cloudflare R2 Worker binding
+ * dropyard talks to storage two ways: through the Cloudflare R2 Worker binding
  * (`BUCKET`) when it exists, and through the S3 API (presigned multipart
  * uploads, the RAR container, and every non-R2 backend). The S3 side is
  * configured with `S3_*` variables; the older `R2_*` names keep working.
@@ -122,7 +122,7 @@ class S3Object {
 }
 
 /**
- * The slice of the R2 bucket API gitctx uses (get / head / put / delete /
+ * The slice of the R2 bucket API dropyard uses (get / head / put / delete /
  * list), implemented over the S3 REST API so any S3-compatible service works.
  */
 export class S3Bucket {

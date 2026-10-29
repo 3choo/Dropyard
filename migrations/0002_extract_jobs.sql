@@ -1,4 +1,4 @@
--- gitctx schema v2: automatic archive extraction (.zip / .rar)
+-- dropyard schema v2: automatic archive extraction (.zip / .rar)
 CREATE TABLE extract_jobs (
   id TEXT PRIMARY KEY,
   release_id TEXT NOT NULL REFERENCES releases(id) ON DELETE CASCADE,

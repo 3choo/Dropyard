@@ -23,7 +23,7 @@ export const gitRoutes = new Hono<AppEnv>();
 
 type GitAuth = { user: SessionUser | null; tokenProjectId: string | null; canRead: boolean };
 
-const REALM = 'Basic realm="gitctx", charset="UTF-8"';
+const REALM = 'Basic realm="dropyard", charset="UTF-8"';
 
 function challenge(message = 'Authentication required'): Response {
   return new Response(`${message}\n`, {
@@ -121,7 +121,7 @@ async function gate(c: Context<AppEnv>, write: boolean): Promise<Gate> {
   if (auth.tokenProjectId && auth.tokenProjectId !== repo.id) return plain(403, 'This deploy token is scoped to a different project');
   if (write) {
     if (!auth.user) return plain(403, 'Deploy tokens are read-only; push with a personal access token');
-    if (auth.user.role === 'viewer') return plain(403, 'Your gitctx role (viewer) cannot push; ask an admin for uploader access');
+    if (auth.user.role === 'viewer') return plain(403, 'Your dropyard role (viewer) cannot push; ask an admin for uploader access');
   }
   return { repo, auth, info: { projectId: repo.id, defaultBranch: repo.default_branch, protectDefault: repo.protect_default === 1 } };
 }
@@ -133,7 +133,7 @@ function wantsV2(c: Context<AppEnv>): boolean {
 gitRoutes.get('/:repo/info/refs', async (c) => {
   const service = c.req.query('service');
   if (service !== 'git-upload-pack' && service !== 'git-receive-pack') {
-    return plain(403, 'gitctx only speaks the smart HTTP protocol; update your git client');
+    return plain(403, 'dropyard only speaks the smart HTTP protocol; update your git client');
   }
   const g = await gate(c, service === 'git-receive-pack');
   if (g instanceof Response) return g;
