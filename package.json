@@ -1,16 +1,19 @@
 {
   "name": "gitctx",
   "private": true,
+  "license": "MIT",
+  "description": "Self-hosted release and Git panel for FiveM server content on Cloudflare Workers",
   "type": "module",
   "scripts": {
     "dev": "wrangler dev",
     "dev:web": "vite",
     "build": "vite build",
-    "deploy": "npm run build && wrangler deploy",
+    "setup": "node scripts/setup.mjs",
+    "deploy": "npm run build && node scripts/wrangler.mjs deploy",
     "typecheck": "tsc --noEmit -p tsconfig.worker.json && tsc --noEmit -p web/tsconfig.json",
     "test": "vitest run",
     "cf-typegen": "wrangler types",
-    "migrate:remote": "wrangler d1 migrations apply gitctx --remote"
+    "migrate:remote": "node scripts/wrangler.mjs d1 migrations apply gitctx --remote"
   },
   "dependencies": {
     "@cloudflare/containers": "^0.3.7",

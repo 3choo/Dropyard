@@ -7,3 +7,9 @@ web/dist/
 *.log
 .DS_Store
 /state
+/wrangler.local.jsonc
+.dev.vars*
+.env
+.env.*
+coverage/
+r2-cors.local.json
