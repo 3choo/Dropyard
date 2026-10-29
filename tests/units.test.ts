@@ -101,6 +101,8 @@ describe('pkt-lines', () => {
   });
 });
 
+const hex = (b: Uint8Array) => [...b].map((x) => x.toString(16).padStart(2, '0')).join('');
+
 describe('resumable SHA-1', () => {
   it('matches node:crypto, including across a saved state', () => {
     const data = new Uint8Array(1000).map((_, i) => i % 251);
@@ -111,8 +113,8 @@ describe('resumable SHA-1', () => {
     const resumed = new Sha1(split.save());
     resumed.update(data.subarray(333));
     const expected = createHash('sha1').update(data).digest('hex');
-    expect(Buffer.from(whole.digest()).toString('hex')).toBe(expected);
-    expect(Buffer.from(resumed.digest()).toString('hex')).toBe(expected);
+    expect(hex(whole.digest())).toBe(expected);
+    expect(hex(resumed.digest())).toBe(expected);
   });
 });
 
