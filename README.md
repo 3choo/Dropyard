@@ -13,7 +13,9 @@ pulls them over stable, token-authenticated URLs.
 - Releases with notes, digests and rollback-by-republish
 - Deploy tokens (global or per-project) for the FiveM server
 - Email + password accounts, three roles: admin / uploader / viewer
-- Optional Discord announcement on publish
+- **Integrations** (Admin → Integrations): Discord, Slack, Teams, Google Chat,
+  Telegram, Matrix, Mattermost, ntfy and a signed JSON webhook, for releases,
+  pushes, issues and pull requests, with a Test button and delivery log
 - **Real Git hosting**: every project is a Git repository that GitHub Desktop
   (or plain `git`) clones, pulls and pushes, with a GitHub-style Code tab,
   commit history, diffs, branches, pull requests with reviews, issues and
@@ -140,6 +142,22 @@ downloads the whole library, which can be many GB, and Git cannot resume a
 broken clone. For those, use **Clone → resumable starter download**: the panel
 prepares a git bundle you download in the browser (with resume), clone from it
 locally, then point `origin` back at dropyard so later fetches are small.
+
+### Integrations
+
+Open **Admin → Integrations**, press **Add integration**, pick a type, paste its
+webhook URL or token, and choose which events it should receive (optionally for
+one project only). **Test** sends a sample message, **Deliveries** shows the
+last 30 attempts and lets you redeliver a failed one. Failed requests are retried
+twice. Apply the v6 migration (`npm run migrate:remote`) first; an existing
+Discord webhook is carried over automatically.
+
+The **Webhook** type posts each event as JSON. With a signing secret every
+request carries `x-dropyard-timestamp` and `x-dropyard-signature: sha256=<hex>`,
+the HMAC-SHA256 of `<timestamp>.<body>`; verify it and reject old timestamps.
+Events: `release.published`, `release.deleted`, `push`, `issue.opened`,
+`pr.opened`, `pr.merged`. A new connector is one file in `src/integrations/`
+plus a line in its `index.ts`.
 
 ### Custom domain later
 

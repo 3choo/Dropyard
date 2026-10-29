@@ -33,7 +33,7 @@ const UPLOAD_CONCURRENCY = 12;
 // Per-callback chunk into the Worker; each chunk becomes one D1 batch.
 const CALLBACK_FILES = 200;
 
-const logSafe = (v) => String(v).replace(/[\r\n]+/g, ' ');
+const logSafe = (v) => String(v).replace(/\n|\r/g, ' ');
 
 function fmtBytes(n) {
   const units = ['B', 'KiB', 'MiB', 'GiB', 'TiB'];

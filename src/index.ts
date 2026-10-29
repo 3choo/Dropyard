@@ -5,6 +5,7 @@ import { adminRoutes } from './routes/admin';
 import { authRoutes } from './routes/auth';
 import { dlRoutes } from './routes/dl';
 import { gitRoutes } from './routes/git';
+import { integrationRoutes } from './routes/integrations';
 import { internalRoutes } from './routes/internal';
 import { issueRoutes } from './routes/issues';
 import { meRoutes } from './routes/me';
@@ -35,6 +36,7 @@ app.route('/api/projects', issueRoutes);
 app.route('/api/uploads', uploadRoutes);
 app.route('/api/tokens', tokenRoutes);
 app.route('/api/admin', adminRoutes);
+app.route('/api/integrations', integrationRoutes);
 app.route('/api/internal', internalRoutes);
 app.route('/api/me', meRoutes);
 

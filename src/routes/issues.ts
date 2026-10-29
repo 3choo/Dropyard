@@ -1,5 +1,6 @@
 import { Hono, type Context } from 'hono';
 import { audit } from '../lib/audit';
+import { emit } from '../lib/events';
 import { badRequest, conflict, forbidden, notFound } from '../lib/http';
 import { nowMs, randomId, sanitizeFilePath } from '../lib/ids';
 import { requireRole, requireSession, sessionUser, type AppEnv } from '../middleware';
@@ -255,6 +256,15 @@ issueRoutes.post('/:slug/issues', requireSession(), async (c) => {
     authorId: user.id,
   });
   await audit(c.env.DB, user.email, 'issue.create', `project:${project.slug}#${row.number}`);
+  emit(c.env, (p) => c.executionCtx.waitUntil(p), new URL(c.req.url).origin, {
+    type: 'issue.opened',
+    project,
+    actor: user.email,
+    title: `${project.name} — issue #${row.number}: ${row.title}`,
+    body: row.body,
+    path: `/p/${project.slug}/issues/${row.number}`,
+    data: { number: row.number },
+  });
   return c.json({ number: row.number }, 201);
 });
 
@@ -288,6 +298,15 @@ issueRoutes.post('/:slug/pulls', requireRole('admin', 'uploader'), async (c) => 
     baseSha,
   });
   await audit(c.env.DB, user.email, 'pull.create', `project:${project.slug}#${row.number}`, { head, base });
+  emit(c.env, (p) => c.executionCtx.waitUntil(p), new URL(c.req.url).origin, {
+    type: 'pr.opened',
+    project,
+    actor: user.email,
+    title: `${project.name} — pull request #${row.number}: ${row.title}`,
+    body: `${head} → ${base}${row.body ? `\n${row.body}` : ''}`,
+    path: `/p/${project.slug}/pulls/${row.number}`,
+    data: { number: row.number, head, base },
+  });
   return c.json({ number: row.number }, 201);
 });
 
@@ -626,5 +645,14 @@ issueRoutes.post('/:slug/pulls/:number/merge', requireRole('admin', 'uploader'),
   }
   await c.env.DB.prepare('UPDATE projects SET updated_at = ? WHERE id = ?').bind(now, project.id).run();
   await audit(c.env.DB, user.email, 'pull.merge', `project:${project.slug}#${pr.number}`, { method, commit });
+  emit(c.env, (p) => c.executionCtx.waitUntil(p), new URL(c.req.url).origin, {
+    type: 'pr.merged',
+    project,
+    actor: user.email,
+    title: `${project.name} — pull request #${pr.number} merged: ${pr.title}`,
+    body: `${pr.head_branch} → ${pr.base_branch} (${method})`,
+    path: `/p/${project.slug}/pulls/${pr.number}`,
+    data: { number: pr.number, method, commit },
+  });
   return c.json({ commit, method });
 });

@@ -81,27 +81,3 @@ adminRoutes.get('/audit', async (c) => {
     .all();
   return c.json({ entries: rows.results });
 });
-
-adminRoutes.get('/settings', async (c) => {
-  const row = await c.env.DB
-    .prepare("SELECT value FROM settings WHERE key = 'discord_webhook_url'")
-    .first<{ value: string }>();
-  return c.json({ discordWebhookUrl: row?.value ?? '' });
-});
-
-adminRoutes.put('/settings', async (c) => {
-  const body = await c.req.json<Record<string, unknown>>().catch(() => null);
-  const { discordWebhookUrl } = (body ?? {}) as { discordWebhookUrl?: string };
-  const value = (discordWebhookUrl ?? '').trim();
-  if (value && !/^https:\/\/(discord|discordapp)\.com\/api\/webhooks\//.test(value)) {
-    throw badRequest('That does not look like a Discord webhook URL');
-  }
-  await c.env.DB
-    .prepare(
-      "INSERT INTO settings (key, value) VALUES ('discord_webhook_url', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-    )
-    .bind(value)
-    .run();
-  await audit(c.env.DB, sessionUser(c).email, 'settings.update', 'settings:discord_webhook', { enabled: !!value });
-  return c.json({ ok: true });
-});

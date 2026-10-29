@@ -1,5 +1,6 @@
 import { Hono, type Context } from 'hono';
 import { audit } from '../lib/audit';
+import { emit } from '../lib/events';
 import { checkPassword, clientIp, resolveUserToken, type SessionUser } from '../lib/auth';
 import { nowMs } from '../lib/ids';
 import { resolveToken, type AppEnv } from '../middleware';
@@ -67,12 +68,12 @@ async function authenticate(c: Context<AppEnv>): Promise<GitAuth | null> {
   return { user: account, tokenProjectId: null, canRead: true };
 }
 
-type RepoRow = { id: string; slug: string; default_branch: string; protect_default: number };
+type RepoRow = { id: string; slug: string; name: string; default_branch: string; protect_default: number };
 
 async function findRepo(c: Context<AppEnv>): Promise<RepoRow | null> {
   const slug = (c.req.param('repo') ?? '').replace(/\.git$/, '');
   return c.env.DB
-    .prepare('SELECT id, slug, default_branch, protect_default FROM projects WHERE slug = ?')
+    .prepare('SELECT id, slug, name, default_branch, protect_default FROM projects WHERE slug = ?')
     .bind(slug)
     .first<RepoRow>();
 }
@@ -177,6 +178,16 @@ gitRoutes.post('/:repo/git-receive-pack', async (c) => {
       await c.env.DB.prepare('UPDATE projects SET updated_at = ? WHERE id = ?').bind(nowMs(), g.repo.id).run();
       await audit(c.env.DB, user.email, 'git.push', `project:${g.repo.slug}`, {
         refs: commands.map((cmd, i) => ({ ref: cmd.ref, from: cmd.oldSha, to: cmd.newSha, ok: results[i]?.ok ?? false })),
+      });
+      const pushed = commands.filter((_, i) => results[i]?.ok).map((cmd) => ({ ref: cmd.ref, from: cmd.oldSha, to: cmd.newSha }));
+      emit(c.env, (p) => c.executionCtx.waitUntil(p), new URL(c.req.url).origin, {
+        type: 'push',
+        project: g.repo,
+        actor: user.email,
+        title: `${g.repo.name} — push by ${user.name}`,
+        body: pushed.map((r) => r.ref.replace(/^refs\/(heads|tags)\//, '')).join(', '),
+        path: `/p/${g.repo.slug}/commits`,
+        data: { refs: pushed },
       });
     }
     return new Response(stream, { headers: { 'content-type': contentType, ...NO_CACHE } });

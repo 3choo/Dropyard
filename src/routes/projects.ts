@@ -1,5 +1,6 @@
 import { Hono, type Context } from 'hono';
 import { audit } from '../lib/audit';
+import { emit } from '../lib/events';
 import { retryExtraction, type ExtractJobRow } from '../lib/extract';
 import { badRequest, conflict, forbidden, notFound, tooLarge } from '../lib/http';
 import { nowMs, randomId, sanitizeFilePath, sha256Hex, slugify } from '../lib/ids';
@@ -567,24 +568,15 @@ projectRoutes.post('/:slug/releases/:version/publish', requireRole('admin', 'upl
     }
   }
 
-  const webhook = await c.env.DB
-    .prepare("SELECT value FROM settings WHERE key = 'discord_webhook_url'")
-    .first<{ value: string }>();
-  if (webhook?.value) {
-    const embed = {
-      title: `${project.name} — v${release.version}`,
-      description: (release.notes || release.title || 'New release published.').slice(0, 500),
-      color: 0xc9f24f,
-      footer: { text: `dropyard · ${project.slug}` },
-    };
-    c.executionCtx.waitUntil(
-      fetch(webhook.value, {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ embeds: [embed] }),
-      }).catch(() => {}),
-    );
-  }
+  emit(c.env, (p) => c.executionCtx.waitUntil(p), new URL(c.req.url).origin, {
+    type: 'release.published',
+    project,
+    actor: user.email,
+    title: `${project.name} — v${release.version}`,
+    body: release.notes || release.title || 'New release published.',
+    path: `/p/${project.slug}/r/${release.version}`,
+    data: { version: release.version, digest, commit: release.commit_sha ?? null },
+  });
   return c.json({ ok: true, version: release.version, digest });
 });
 
@@ -630,6 +622,14 @@ projectRoutes.delete('/:slug/releases/:version', requireRole('admin', 'uploader'
   } while (cursor);
   await deleteUnreferencedObjects(c.env.DB, getBucket(c.env), keys);
   await audit(c.env.DB, user.email, 'release.delete', `project:${project.slug}/v${release.version}`);
+  emit(c.env, (p) => c.executionCtx.waitUntil(p), new URL(c.req.url).origin, {
+    type: 'release.deleted',
+    project,
+    actor: user.email,
+    title: `${project.name} — v${release.version} deleted`,
+    path: `/p/${project.slug}`,
+    data: { version: release.version },
+  });
   return c.json({ ok: true });
 });
 

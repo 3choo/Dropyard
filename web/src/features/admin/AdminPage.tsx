@@ -6,13 +6,14 @@ import { api, errMsg } from '../../api/client';
 import { useAuth, type Role } from '../../auth/AuthProvider';
 import { Button, CopyButton, Input, Modal, Select, Spinner, toast } from '../../components/ui';
 import { formatDate, timeAgo } from '../../lib/format';
+import { IntegrationsTab } from './IntegrationsTab';
 
 const TABS = [
   { id: 'members', label: 'Members' },
   { id: 'invites', label: 'Invites' },
   { id: 'tokens', label: 'Deploy tokens' },
   { id: 'audit', label: 'Audit' },
-  { id: 'webhook', label: 'Webhook' },
+  { id: 'integrations', label: 'Integrations' },
 ] as const;
 
 type TabId = (typeof TABS)[number]['id'];
@@ -50,7 +51,7 @@ export function AdminPage() {
         {tab === 'invites' ? <InvitesTab /> : null}
         {tab === 'tokens' ? <TokensTab /> : null}
         {tab === 'audit' ? <AuditTab /> : null}
-        {tab === 'webhook' ? <WebhookTab /> : null}
+        {tab === 'integrations' ? <IntegrationsTab /> : null}
       </div>
     </div>
   );
@@ -353,49 +354,6 @@ function AuditTab() {
       {(q.data?.entries.length ?? 0) === 0 ? (
         <p className="py-6 text-center text-[13px] text-ink-3">Nothing recorded yet.</p>
       ) : null}
-    </div>
-  );
-}
-
-// --- Webhook ------------------------------------------------------------------------------
-
-function WebhookTab() {
-  const q = useQuery({
-    queryKey: ['admin', 'settings'],
-    queryFn: () => api<{ discordWebhookUrl: string }>('/api/admin/settings'),
-  });
-  const [url, setUrl] = useState<string | null>(null);
-  const value = url ?? q.data?.discordWebhookUrl ?? '';
-
-  const save = useMutation({
-    mutationFn: () => api('/api/admin/settings', { method: 'PUT', body: JSON.stringify({ discordWebhookUrl: value }) }),
-    onSuccess: () => toast(value ? 'Discord announcements on — new releases will post there' : 'Discord announcements off'),
-    onError: (e) => toast(errMsg(e), 'err'),
-  });
-
-  return (
-    <div className="max-w-lg">
-      <p className="mb-3 text-[13px] leading-relaxed text-ink-2">
-        When set, publishing a release announces it to this Discord channel — project name, version and the first
-        lines of the notes.
-      </p>
-      <form
-        className="flex gap-2"
-        onSubmit={(e: FormEvent) => {
-          e.preventDefault();
-          save.mutate();
-        }}
-      >
-        <Input
-          type="url"
-          placeholder="https://discord.com/api/webhooks/…"
-          value={value}
-          onChange={(e) => setUrl(e.target.value)}
-        />
-        <Button type="submit" variant="primary" loading={save.isPending}>
-          Save
-        </Button>
-      </form>
     </div>
   );
 }
