@@ -33,6 +33,8 @@ const UPLOAD_CONCURRENCY = 12;
 // Per-callback chunk into the Worker; each chunk becomes one D1 batch.
 const CALLBACK_FILES = 200;
 
+const logSafe = (v) => String(v).replace(/[\r\n]+/g, ' ');
+
 function fmtBytes(n) {
   const units = ['B', 'KiB', 'MiB', 'GiB', 'TiB'];
   let v = n;
@@ -246,8 +248,7 @@ function parseListing(stdout) {
 
 async function runJob(payload) {
   const { jobId, volumes, prefix, caps, r2 } = payload;
-  const work = join(tmpdir(), `dropyard-${jobId}`);
-  const vols = join(work, 'volumes');
+  let work;
   const client = new AwsClient({
     accessKeyId: r2.accessKeyId,
     secretAccessKey: r2.secretAccessKey,
@@ -256,7 +257,10 @@ async function runJob(payload) {
   });
 
   try {
-    await fs.mkdir(vols, { recursive: true });
+    // mkdtemp makes a fresh private (0700) directory with an unpredictable name.
+    work = await fs.mkdtemp(join(tmpdir(), 'dropyard-'));
+    const vols = join(work, 'volumes');
+    await fs.mkdir(vols);
 
     // 7zz resolves sibling volumes by filename, so keep their basenames intact.
     const volumeBase = (v) => v.path.split('/').pop();
@@ -412,10 +416,10 @@ async function runJob(payload) {
       // Catch the tail batches whose uploads the loop never awaited.
       await Promise.all(uploads);
 
-      if (notes) console.log(`[extract] ${jobId} 7zz notes: ${notes}`);
+      if (notes) console.log('[extract] %s 7zz notes: %s', logSafe(jobId), logSafe(notes));
       await callback({ jobId, type: 'stage', phase: 'finish', log: 'all uploads settled' }, payload);
       await callback({ jobId, type: 'done' }, payload);
-      console.log(`[extract] ${jobId} done: ${entries.length} files, ${totalBytes} bytes`);
+      console.log('[extract] %s done: %d files, %d bytes', logSafe(jobId), entries.length, totalBytes);
     } catch (err) {
       if (currentJob) currentJob.cancelled = true; // stop in-flight batch uploads
       throw err;
@@ -424,7 +428,7 @@ async function runJob(payload) {
       await Promise.allSettled(uploads);
     }
   } finally {
-    await fs.rm(work, { recursive: true, force: true }).catch(() => {});
+    if (work) await fs.rm(work, { recursive: true, force: true }).catch(() => {});
   }
 }
 
@@ -444,7 +448,7 @@ const server = createServer((req, res) => {
       runJob(payload)
         .then(() => process.exit(0))
         .catch(async (err) => {
-          console.error(`[extract] ${payload.jobId} failed:`, err);
+          console.error('[extract] %s failed: %s', logSafe(payload.jobId), logSafe(err?.stack ?? err));
           if (!(err instanceof JobClosed)) {
             await callback({ jobId: payload.jobId, type: 'failed', error: err.message }, payload).catch(() => {});
           }

@@ -224,7 +224,9 @@ export function EditPage({ creating = false }: { creating?: boolean }) {
   if (!repo || (!creating && !blob.data)) {
     return blob.isError ? <p className="text-[13px] text-danger">This file cannot be edited.</p> : <Loading />;
   }
-  if (!creating && blob.data?.kind !== 'text') return <p className="text-[13px] text-ink-2">Binary files can't be edited in the browser.</p>;
+  if (!creating && blob.data?.kind !== 'text') {
+    return <p className="text-[13px] text-ink-2">Binary files can&apos;t be edited in the browser.</p>;
+  }
 
   return (
     <div>

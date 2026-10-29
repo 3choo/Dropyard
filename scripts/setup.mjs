@@ -1,7 +1,7 @@
 // Interactive setup: creates storage + database, writes wrangler.local.jsonc,
 // stores secrets, applies CORS and migrations.   npm run setup
 import { spawnSync } from 'node:child_process';
-import { existsSync, readFileSync, writeFileSync } from 'node:fs';
+import { readFileSync, writeFileSync } from 'node:fs';
 import { createInterface } from 'node:readline/promises';
 
 const rl = createInterface({ input: process.stdin, output: process.stdout });
@@ -16,11 +16,6 @@ const run = (args, input) =>
 
 const OUT = 'wrangler.local.jsonc';
 console.log('dropyard setup — requires `npx wrangler login` to have been run.\n');
-
-if (existsSync(OUT) && (await ask(`${OUT} exists. Overwrite?`, 'n')).toLowerCase() !== 'y') {
-  console.log('Keeping existing config. Delete it to start over.');
-  process.exit(0);
-}
 
 const backend = (await ask('Storage backend: r2 (Cloudflare R2) or s3 (AWS S3, MinIO, Backblaze, ...)', 'r2')).toLowerCase();
 const isS3 = backend === 's3';
@@ -64,7 +59,16 @@ if (isS3) {
   secrets.R2_SECRET_ACCESS_KEY = await ask('Secret access key');
 }
 secrets.EXTRACT_CALLBACK_SECRET = Array.from(crypto.getRandomValues(new Uint8Array(32)), (b) => b.toString(16).padStart(2, '0')).join('');
-writeFileSync(OUT, cfg);
+try {
+  writeFileSync(OUT, cfg, { flag: 'wx' });
+} catch (e) {
+  if (e.code !== 'EEXIST') throw e;
+  if ((await ask(`${OUT} exists. Overwrite?`, 'n')).toLowerCase() !== 'y') {
+    console.log('Keeping existing config. Delete it to start over.');
+    process.exit(0);
+  }
+  writeFileSync(OUT, cfg);
+}
 console.log(`\nWrote ${OUT} (gitignored).`);
 
 const origins = (await ask('Browser origins allowed to upload directly to storage, comma separated (your workers.dev URL or custom domain)', 'http://localhost:5173')).split(',').map((s) => s.trim()).filter(Boolean);
