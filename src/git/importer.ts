@@ -7,6 +7,7 @@ import { nowMs } from '../lib/ids';
 import { MODE_FILE, hashObject, objectHeader } from './objects';
 import { buildTree, createCommit, listRefs, updateRef } from './repo';
 import { GitStore } from './store';
+import { getBucket } from '../lib/storage';
 
 export type ImportRow = {
   project_id: string;
@@ -165,7 +166,7 @@ export async function importStep(env: Env, projectId: string, defaultBranch: str
           batch.map(async (f) => {
             const sha = known.get(f.r2_key);
             if (sha) return { f, sha, size: f.size, fresh: false };
-            const h = await hashStored(env.BUCKET, f.r2_key);
+            const h = await hashStored(getBucket(env), f.r2_key);
             known.set(f.r2_key, h.sha);
             return { f, sha: h.sha, size: h.size, fresh: true };
           }),

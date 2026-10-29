@@ -5,12 +5,12 @@ interface __BaseEnv_Env {
 	BUCKET: R2Bucket;
 	DB: D1Database;
 	ASSETS: Fetcher;
-	R2_S3_ACCOUNT_ID: "";
-	R2_BUCKET_NAME: "gitctx";
-	MAX_SINGLE_UPLOAD_MB: "90";
-	MAX_UNPACK_FILES: "20000";
-	MAX_UNPACK_FILE_MB: "5120";
-	MAX_UNPACK_TOTAL_MB: "51200";
+	R2_S3_ACCOUNT_ID: string;
+	R2_BUCKET_NAME: string;
+	MAX_SINGLE_UPLOAD_MB: string;
+	MAX_UNPACK_FILES: string;
+	MAX_UNPACK_FILE_MB: string;
+	MAX_UNPACK_TOTAL_MB: string;
 	EXTRACT_RUNNER: DurableObjectNamespace<import("./src/index").ExtractRunner>;
 }
 declare namespace Cloudflare {

@@ -1,10 +1,11 @@
 import { Hono, type Context } from 'hono';
 import { ApiError, attachment, badRequest, notFound } from '../lib/http';
 import { pullScript } from '../lib/pullscript';
-import { R2S3 } from '../lib/r2s3';
+import { S3Storage } from '../lib/s3';
 import { planZip, zipStream } from '../lib/zipstream';
 import { requireAuthAny, type AppEnv } from '../middleware';
 import { loadProject, type ProjectRow } from './projects';
+import { getBucket } from '../lib/storage';
 
 type ReleaseRow = { id: string; version: string; status: string; published_at: number | null; digest: string | null };
 type FileRow = {
@@ -75,7 +76,7 @@ async function serveRelease(c: Context<AppEnv>, which: string): Promise<Response
     file = files.results[0]!;
   }
 
-  const s3 = new R2S3(c.env);
+  const s3 = new S3Storage(c.env);
   if (c.req.query('direct') === '1' && s3.enabled) {
     countFileDownload(c, release.id, file.id);
     return new Response(null, {
@@ -85,13 +86,13 @@ async function serveRelease(c: Context<AppEnv>, which: string): Promise<Response
   }
 
   const filename = file.path.split('/').pop() ?? 'download';
-  const etag = (await c.env.BUCKET.head(file.r2_key))?.httpEtag ?? `"${release.id}-${file.id}"`;
+  const etag = (await getBucket(c.env).head(file.r2_key))?.httpEtag ?? `"${release.id}-${file.id}"`;
   if (c.req.header('if-none-match') === etag) {
     return new Response(null, { status: 304, headers: { etag } });
   }
 
   const range = parseRange(c.req.header('range'), file.size);
-  const obj = await c.env.BUCKET.get(
+  const obj = await getBucket(c.env).get(
     file.r2_key,
     range ? { range: { offset: range.offset, length: range.length } } : undefined,
   );
@@ -137,7 +138,7 @@ function countReleaseDownload(c: Context<AppEnv>, releaseId: string): void {
 }
 
 function serveZip(c: Context<AppEnv>, project: ProjectRow, release: ReleaseRow, files: FileRow[]): Response {
-  const bucket = c.env.BUCKET;
+  const bucket = getBucket(c.env);
   const plan = planZip(
     files.map((f) => ({
       name: f.path,
@@ -169,7 +170,7 @@ async function serveManifest(c: Context<AppEnv>): Promise<Response> {
   const { project, release } = await resolveRelease(c, 'latest');
   const headers = { 'content-type': 'text/plain; charset=utf-8', 'cache-control': 'no-store' };
   const cacheKey = `p/${project.id}/r/${release.id}~manifest-v1.txt`;
-  const cached = await c.env.BUCKET.get(cacheKey);
+  const cached = await getBucket(c.env).get(cacheKey);
   if (cached) return new Response(cached.body, { headers });
 
   const files = await c.env.DB
@@ -177,7 +178,7 @@ async function serveManifest(c: Context<AppEnv>): Promise<Response> {
     .bind(release.id)
     .all<{ path: string; r2_key: string; size: number; digest: string | null }>();
   const etags = await objectEtags(
-    c.env.BUCKET,
+    getBucket(c.env),
     files.results.filter((f) => !f.digest).map((f) => f.r2_key),
   );
   const lines = [
@@ -193,7 +194,7 @@ async function serveManifest(c: Context<AppEnv>): Promise<Response> {
   }
   const text = lines.join('\n') + '\n';
   if (files.results.every((f) => f.digest || etags.has(f.r2_key))) {
-    c.executionCtx.waitUntil(c.env.BUCKET.put(cacheKey, text).then(() => {}).catch(() => {}));
+    c.executionCtx.waitUntil(getBucket(c.env).put(cacheKey, text).then(() => {}).catch(() => {}));
   }
   return new Response(text, { headers });
 }
@@ -202,7 +203,7 @@ const MAX_LINKS = 250_000;
 const LINK_TTL_SECONDS = 12 * 60 * 60;
 
 async function serveLinks(c: Context<AppEnv>): Promise<Response> {
-  const s3 = new R2S3(c.env);
+  const s3 = new S3Storage(c.env);
   if (!s3.enabled) {
     throw new ApiError(501, 'direct_unavailable', 'Direct R2 links need the R2 S3 API credentials on the Worker');
   }

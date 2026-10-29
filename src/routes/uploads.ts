@@ -3,9 +3,10 @@ import { audit } from '../lib/audit';
 import { maybeStartExtraction } from '../lib/extract';
 import { badRequest, conflict, notFound, tooLarge } from '../lib/http';
 import { nowMs, randomId, sanitizeFilePath, sha256Hex } from '../lib/ids';
-import { MAX_OBJECT_BYTES, R2S3, partSizeFor } from '../lib/r2s3';
+import { MAX_OBJECT_BYTES, S3Storage, partSizeFor } from '../lib/s3';
 import { deleteUnreferencedObjects, writeKeyFor } from '../lib/r2refs';
 import { requireRole, sessionUser, type AppEnv } from '../middleware';
+import { getBucket } from '../lib/storage';
 
 type UploadRow = {
   id: string;
@@ -89,7 +90,7 @@ uploadRoutes.post('/', async (c) => {
       c.env.DB.prepare('DELETE FROM release_files WHERE id = ?').bind(prevFile.id),
       c.env.DB.prepare('DELETE FROM upload_sessions WHERE file_id = ?').bind(prevFile.id),
     ]);
-    c.executionCtx.waitUntil(deleteUnreferencedObjects(c.env.DB, c.env.BUCKET, [prevFile.r2_key]));
+    c.executionCtx.waitUntil(deleteUnreferencedObjects(c.env.DB, getBucket(c.env), [prevFile.r2_key]));
   }
   const stale = await c.env.DB
     .prepare("SELECT id, mode, s3_upload_id FROM upload_sessions WHERE release_id = ? AND status = 'active' AND r2_key = ?")
@@ -99,7 +100,7 @@ uploadRoutes.post('/', async (c) => {
     void (async () => {
       for (const s of stale.results) {
         if (s.mode === 'presigned' && s.s3_upload_id) {
-          await new R2S3(c.env).abort(`p/${release.project_id}/r/${release.id}/${cleanPath}`, s.s3_upload_id).catch(() => {});
+          await new S3Storage(c.env).abort(`p/${release.project_id}/r/${release.id}/${cleanPath}`, s.s3_upload_id).catch(() => {});
         }
       }
       await c.env.DB
@@ -113,7 +114,7 @@ uploadRoutes.post('/', async (c) => {
   const id = randomId(12);
   const r2Key = await writeKeyFor(c.env.DB, release.project_id, release.id, cleanPath, id);
   const limit = singleUploadLimit(c.env);
-  const s3 = new R2S3(c.env);
+  const s3 = new S3Storage(c.env);
   const now = nowMs();
 
   if (size <= limit) {
@@ -158,7 +159,7 @@ uploadRoutes.post('/:id/parts', async (c) => {
       throw badRequest('Each part needs a number within range and a base64 SHA-256');
     }
   }
-  const s3 = new R2S3(c.env);
+  const s3 = new S3Storage(c.env);
   const urls = await Promise.all(
     parts.map(async (p) => ({ n: p.n!, url: await s3.presignPart(upload.r2_key, upload.s3_upload_id, p.n!, contentType) })),
   );
@@ -171,7 +172,7 @@ uploadRoutes.put('/:id/body', async (c) => {
   if (upload.mode !== 'single') throw badRequest('This session expects multipart parts, not a single body');
   if (!c.req.raw.body) throw badRequest('A request body is required');
   const contentType = c.req.header('content-type') ?? 'application/octet-stream';
-  await c.env.BUCKET.put(upload.r2_key, c.req.raw.body, {
+  await getBucket(c.env).put(upload.r2_key, c.req.raw.body, {
     httpMetadata: { contentType },
   });
   const extraction = await completeUpload(c, upload, null, []);
@@ -193,16 +194,16 @@ uploadRoutes.post('/:id/complete', async (c) => {
     }
     if (typeof p.sha256 !== 'string') throw badRequest(`Part ${i + 1} is missing its SHA-256`);
   }
-  const s3 = new R2S3(c.env);
+  const s3 = new S3Storage(c.env);
   await s3.complete(
     upload.r2_key,
     upload.s3_upload_id,
     sorted.map((p) => ({ n: p.n!, etag: p.etag! })),
   );
-  const head = await c.env.BUCKET.head(upload.r2_key);
+  const head = await getBucket(c.env).head(upload.r2_key);
   if (!head) throw badRequest('R2 did not retain the assembled object; retry the upload');
   if (head.size !== upload.size) {
-    await c.env.BUCKET.delete(upload.r2_key);
+    await getBucket(c.env).delete(upload.r2_key);
     throw badRequest(`Assembled size ${head.size} does not match the declared ${upload.size}; retry the upload`);
   }
   const partDigests = sorted.map((p) => ({ n: p.n!, sha256: p.sha256! }));
@@ -213,7 +214,7 @@ uploadRoutes.post('/:id/complete', async (c) => {
 
 uploadRoutes.post('/:id/resume', async (c) => {
   const upload = await loadPresignedUpload(c.env.DB, c.req.param('id'));
-  const s3 = new R2S3(c.env);
+  const s3 = new S3Storage(c.env);
   const parts = await s3.listParts(upload.r2_key, upload.s3_upload_id);
   return c.json({ parts, partSize: upload.part_size, totalParts: upload.total_parts });
 });
@@ -222,9 +223,9 @@ uploadRoutes.post('/:id/abort', async (c) => {
   const upload = await loadUpload(c.env.DB, c.req.param('id'));
   if (upload.status === 'active') {
     if (upload.mode === 'presigned' && upload.s3_upload_id) {
-      await new R2S3(c.env).abort(upload.r2_key, upload.s3_upload_id).catch(() => {});
+      await new S3Storage(c.env).abort(upload.r2_key, upload.s3_upload_id).catch(() => {});
     } else {
-      await c.env.BUCKET.delete(upload.r2_key);
+      await getBucket(c.env).delete(upload.r2_key);
     }
     await c.env.DB.prepare("UPDATE upload_sessions SET status = 'aborted', updated_at = ? WHERE id = ?").bind(nowMs(), upload.id).run();
   }

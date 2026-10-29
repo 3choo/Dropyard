@@ -7,6 +7,7 @@ import { applyDelta, deltaSizes, memoryBase, rangedBase, type BaseSource } from 
 import { CODE_TYPE, hashObject, objectHeader, toHex, type ObjType } from './objects';
 import { GitStore, INLINE_MAX, objectKey, type ObjectMeta } from './store';
 import { ByteReader, inflateToBuffer, inflateZlib } from './stream';
+import { getBucket } from '../lib/storage';
 
 const BUFFER_MAX = 8 * 1024 * 1024;
 const MAX_DELTA = 96 * 1024 * 1024;
@@ -51,7 +52,7 @@ export async function readPack(reader: ByteReader, store: GitStore): Promise<Pac
   const written = new Map<string, Written>();
   const byOffset = new Map<number, string>();
   const cache = new DataCache();
-  const bucket = store.env.BUCKET;
+  const bucket = getBucket(store.env);
   const deferred: { offset: number; base: string; delta: Uint8Array }[] = [];
 
   const stored = async (sha: string): Promise<Written | null> => {

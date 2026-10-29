@@ -1,5 +1,6 @@
 import { AwsClient } from 'aws4fetch';
 import { ApiError } from './http';
+import { s3Config, s3ObjectUrl, type S3Config } from './storage';
 
 export const DEFAULT_PART_SIZE = 64 * 1024 * 1024;
 export const MAX_PARTS = 10_000;
@@ -7,8 +8,6 @@ export const MAX_OBJECT_BYTES = 4_500 * 1024 * 1024 * 1024;
 
 declare global {
   interface Env {
-    R2_ACCESS_KEY_ID?: string;
-    R2_SECRET_ACCESS_KEY?: string;
     EXTRACT_CALLBACK_SECRET?: string;
   }
 }
@@ -37,31 +36,27 @@ function unescapeXml(s: string): string {
 
 export type ListedPart = { n: number; etag: string; size: number };
 
-export class R2S3 {
+export class S3Storage {
   readonly enabled: boolean;
   private readonly client: AwsClient;
-  private readonly account: string;
-  private readonly bucket: string;
+  private readonly cfg: S3Config;
 
   constructor(env: Env) {
-    this.account = env.R2_S3_ACCOUNT_ID;
-    this.bucket = env.R2_BUCKET_NAME;
-    this.enabled = !!(this.account && env.R2_ACCESS_KEY_ID && env.R2_SECRET_ACCESS_KEY);
-    this.client = this.enabled
+    const cfg = s3Config(env);
+    this.enabled = cfg !== null;
+    this.cfg = cfg ?? ({} as S3Config);
+    this.client = cfg
       ? new AwsClient({
-          accessKeyId: env.R2_ACCESS_KEY_ID!,
-          secretAccessKey: env.R2_SECRET_ACCESS_KEY!,
+          accessKeyId: cfg.accessKeyId,
+          secretAccessKey: cfg.secretAccessKey,
           service: 's3',
-          region: 'auto',
+          region: cfg.region,
         })
       : (undefined as unknown as AwsClient);
   }
 
   private objectUrl(key: string, query: Record<string, string> = {}): URL {
-    const encodedKey = key.split('/').map(encodeURIComponent).join('/');
-    const url = new URL(`https://${this.account}.r2.cloudflarestorage.com/${this.bucket}/${encodedKey}`);
-    for (const [k, v] of Object.entries(query)) url.searchParams.set(k, v);
-    return url;
+    return s3ObjectUrl(this.cfg, key, query);
   }
 
   private requireEnabled(): void {
@@ -69,7 +64,7 @@ export class R2S3 {
       throw new ApiError(
         400,
         'presign_unavailable',
-        'Large multipart uploads need R2 S3 API credentials configured on the Worker (R2_S3_ACCOUNT_ID var plus R2_ACCESS_KEY_ID / R2_SECRET_ACCESS_KEY secrets). Small files up to the single-upload limit work without them.',
+        'Large multipart uploads need S3 API credentials configured on the Worker (S3_ENDPOINT, S3_BUCKET, S3_ACCESS_KEY_ID and S3_SECRET_ACCESS_KEY, or the R2_* equivalents). Small files up to the single-upload limit work without them.',
       );
     }
   }
@@ -78,9 +73,9 @@ export class R2S3 {
     this.requireEnabled();
     const res = await this.client.fetch(this.objectUrl(key, { uploads: '' }), { method: 'POST' });
     const body = await res.text();
-    if (!res.ok) throw new ApiError(502, 's3_error', `R2 rejected multipart initiate: ${body.slice(0, 300)}`);
+    if (!res.ok) throw new ApiError(502, 's3_error', `Storage rejected multipart initiate: ${body.slice(0, 300)}`);
     const uploadId = extractTag(body, 'UploadId');
-    if (!uploadId) throw new ApiError(502, 's3_error', 'R2 initiate response missing UploadId');
+    if (!uploadId) throw new ApiError(502, 's3_error', 'Storage initiate response missing UploadId');
     return unescapeXml(uploadId);
   }
 
@@ -115,7 +110,7 @@ export class R2S3 {
     });
     if (!res.ok) {
       const text = await res.text().catch(() => '');
-      throw new ApiError(502, 's3_error', `R2 rejected part ${partNumber}: ${text.slice(0, 300)}`);
+      throw new ApiError(502, 's3_error', `Storage rejected part ${partNumber}: ${text.slice(0, 300)}`);
     }
     return res.headers.get('etag') ?? '';
   }
@@ -129,7 +124,7 @@ export class R2S3 {
       if (marker) query['part-number-marker'] = marker;
       const res = await this.client.fetch(this.objectUrl(key, query));
       const body = await res.text();
-      if (!res.ok) throw new ApiError(502, 's3_error', `R2 ListParts failed: ${body.slice(0, 300)}`);
+      if (!res.ok) throw new ApiError(502, 's3_error', `Storage ListParts failed: ${body.slice(0, 300)}`);
       const chunks = body.match(/<Part>[\s\S]*?<\/Part>/g) ?? [];
       for (const chunk of chunks) {
         const n = parseInt(extractTag(chunk, 'PartNumber') ?? '0', 10);
@@ -158,7 +153,7 @@ export class R2S3 {
       body: xml,
     });
     const body = await res.text();
-    if (!res.ok) throw new ApiError(502, 's3_complete_failed', `R2 rejected multipart complete: ${body.slice(0, 300)}`);
+    if (!res.ok) throw new ApiError(502, 's3_complete_failed', `Storage rejected multipart complete: ${body.slice(0, 300)}`);
     const etag = extractTag(body, 'ETag');
     return etag ? unescapeXml(etag) : '';
   }

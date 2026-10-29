@@ -2,6 +2,7 @@
 // non-blob objects) or R2 (blobs and anything large).
 
 import { parseCommit, type Commit, type ObjType } from './objects';
+import { getBucket } from '../lib/storage';
 
 export const INLINE_MAX = 64 * 1024;
 const IN_CHUNK = 90;
@@ -82,7 +83,7 @@ export class GitStore {
           let data: Uint8Array;
           if (r.data !== null && r.data !== undefined) data = toBytes(r.data);
           else {
-            const obj = await this.env.BUCKET.get(r.r2_key ?? '');
+            const obj = await getBucket(this.env).get(r.r2_key ?? '');
             if (!obj) throw new Error(`object ${r.sha} is missing from storage`);
             data = new Uint8Array(await obj.arrayBuffer());
           }
@@ -153,7 +154,7 @@ export class GitStore {
   async putObject(sha: string, type: ObjType, data: Uint8Array): Promise<void> {
     if (type === 'blob' || data.length > INLINE_MAX) {
       const key = objectKey(this.projectId, sha);
-      await this.env.BUCKET.put(key, data);
+      await getBucket(this.env).put(key, data);
       this.queueIndex(sha, type, data.length, key, null);
     } else {
       this.queueIndex(sha, type, data.length, null, data);
@@ -168,7 +169,7 @@ export class GitStore {
       if (!obj) throw new Error(`object ${meta.sha} missing`);
       return obj.data.subarray(offset, offset + length);
     }
-    const obj = await this.env.BUCKET.get(meta.r2_key, { range: { offset, length } });
+    const obj = await getBucket(this.env).get(meta.r2_key, { range: { offset, length } });
     if (!obj) throw new Error(`object ${meta.sha} is missing from storage`);
     return new Uint8Array(await obj.arrayBuffer());
   }

@@ -38,6 +38,7 @@ import {
 import { StarterError, getStarter, parseRange, presentStarter, startStarter, starterStep, starterStream } from '../git/starter';
 import { GitStore } from '../git/store';
 import { isProtectedBranch, loadProject as loadProjectRow, type ProjectRow } from './projects';
+import { getBucket } from '../lib/storage';
 
 /** Web API over each project's Git repository: browse, history, diffs, web edits. */
 export const repoRoutes = new Hono<AppEnv>();
@@ -183,7 +184,7 @@ repoRoutes.get('/:slug/repo/raw', requireSession(), async (c) => {
     etag: `"${entry.sha}"`,
   });
   if (!meta.r2_key) return new Response(await readBlobBytes(store, meta), { headers });
-  const obj = await c.env.BUCKET.get(meta.r2_key);
+  const obj = await getBucket(c.env).get(meta.r2_key);
   if (!obj) throw notFound('Stored object is missing; contact an admin');
   return new Response(obj.body, { headers });
 });
@@ -398,7 +399,7 @@ repoRoutes.post('/:slug/repo/import/step', requireRole('admin', 'uploader'), asy
 repoRoutes.get('/:slug/repo/starter', requireSession(), async (c) => {
   const { project } = await loadProject(c);
   const head = await getRef(c.env.DB, project.id, `refs/heads/${project.default_branch}`);
-  return c.json({ starter: presentStarter(await getStarter(c.env.BUCKET, project.id)), head });
+  return c.json({ starter: presentStarter(await getStarter(getBucket(c.env), project.id)), head });
 });
 
 repoRoutes.post('/:slug/repo/starter', requireSession(), async (c) => {
@@ -425,7 +426,7 @@ repoRoutes.post('/:slug/repo/starter/step', requireSession(), async (c) => {
 
 repoRoutes.get('/:slug/repo/starter/download', requireSession(), async (c) => {
   const { project } = await loadProject(c);
-  const state = await getStarter(c.env.BUCKET, project.id);
+  const state = await getStarter(getBucket(c.env), project.id);
   if (!state || state.status !== 'ready') throw notFound('The starter download is not ready yet');
   const etag = `"${state.id}"`;
   const ifRange = c.req.header('if-range');
@@ -443,7 +444,7 @@ repoRoutes.get('/:slug/repo/starter/download', requireSession(), async (c) => {
   }
   const start = range ? range.start : 0;
   const end = range ? range.end : state.size - 1;
-  const body = await starterStream(c.env.BUCKET, project.id, state, start, end);
+  const body = await starterStream(getBucket(c.env), project.id, state, start, end);
   const { readable, writable } = new FixedLengthStream(end - start + 1);
   c.executionCtx.waitUntil(body.pipeTo(writable).catch((err) => console.error('starter download failed', project.slug, err)));
   if (range) headers.set('content-range', `bytes ${start}-${end}/${state.size}`);

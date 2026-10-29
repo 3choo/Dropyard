@@ -4,6 +4,7 @@ import { diffText, type Hunk } from '../lib/linediff';
 import { isTextPath, MAX_TEXT_BLOB_BYTES } from '../lib/mime';
 import type { FileDiff } from './repo';
 import { GitStore, type ObjectMeta } from './store';
+import { getBucket } from '../lib/storage';
 
 export type PatchedFile = FileDiff & {
   oldSize: number | null;
@@ -36,7 +37,7 @@ export async function readBlobBytes(store: GitStore, meta: ObjectMeta): Promise<
     if (!obj) throw new Error(`blob ${meta.sha} missing`);
     return obj.data;
   }
-  const obj = await store.env.BUCKET.get(meta.r2_key);
+  const obj = await getBucket(store.env).get(meta.r2_key);
   if (!obj) throw new Error(`blob ${meta.sha} missing from storage`);
   return new Uint8Array(await obj.arrayBuffer());
 }

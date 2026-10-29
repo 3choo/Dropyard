@@ -9,6 +9,7 @@ import { ancestorSet, isAncestor, listRefs, updateRef, validRefName, type Ref } 
 import { GitStore } from './store';
 import { readPack } from './packread';
 import { ByteReader } from './stream';
+import { getBucket } from '../lib/storage';
 
 const AGENT = 'agent=gitctx/1';
 
@@ -200,7 +201,7 @@ async function walkTrees(
 }
 
 function packResponse(store: GitStore, entries: PackEntry[], prefix: Uint8Array[], useSideband: boolean): ReadableStream<Uint8Array> {
-  const pack = packStream(store.env.BUCKET, entries);
+  const pack = packStream(getBucket(store.env), entries);
   const reader = pack.getReader();
   let started = false;
   let finished = false;

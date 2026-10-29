@@ -76,9 +76,11 @@ async function callback(payload, { callbackUrl, secret }) {
 }
 
 function objectUrl(r2, key, query = {}) {
-  const url = new URL(
-    `https://${r2.accountId}.r2.cloudflarestorage.com/${r2.bucket}/${key.split('/').map(encodeURIComponent).join('/')}`,
-  );
+  const base = new URL(r2.endpoint);
+  const encoded = key.split('/').map(encodeURIComponent).join('/');
+  const url = r2.pathStyle
+    ? new URL(`${base.origin}/${r2.bucket}/${encoded}`)
+    : new URL(`${base.protocol}//${r2.bucket}.${base.host}/${encoded}`);
   for (const [k, v] of Object.entries(query)) url.searchParams.set(k, v);
   return url;
 }
@@ -111,14 +113,10 @@ async function downloadTo(client, r2, key, destFile, onBytes) {
 }
 
 async function uploadFile(client, r2, destKey, srcFile, size) {
-  const objectUrl = (query) => {
-    const url = new URL(`https://${r2.accountId}.r2.cloudflarestorage.com/${r2.bucket}/${destKey.split('/').map(encodeURIComponent).join('/')}`);
-    for (const [k, v] of Object.entries(query)) url.searchParams.set(k, v);
-    return url;
-  };
+  const urlFor = (query) => objectUrl(r2, destKey, query);
 
   if (size <= MULTIPART_THRESHOLD) {
-    const res = await client.fetch(objectUrl({}), {
+    const res = await client.fetch(urlFor({}), {
       method: 'PUT',
       headers: { 'content-length': String(size) },
       body: await fs.readFile(srcFile),
@@ -127,7 +125,7 @@ async function uploadFile(client, r2, destKey, srcFile, size) {
     return;
   }
 
-  const init = await client.fetch(objectUrl({ uploads: '' }), { method: 'POST' });
+  const init = await client.fetch(urlFor({ uploads: '' }), { method: 'POST' });
   if (!init.ok) throw new Error(`R2 multipart initiate failed (${init.status})`);
   const uploadId = /<UploadId>([\s\S]*?)<\/UploadId>/.exec(await init.text())?.[1];
   if (!uploadId) throw new Error('R2 multipart initiate returned no UploadId');
@@ -139,7 +137,7 @@ async function uploadFile(client, r2, destKey, srcFile, size) {
     for (let n = 1, offset = 0; offset < size; n++, offset += buf.length) {
       const { bytesRead } = await handle.read(buf, 0, Math.min(buf.length, size - offset), offset);
       const res = await client.fetch(
-        objectUrl({ partNumber: String(n), uploadId: decodeURIComponent(uploadId) }),
+        urlFor({ partNumber: String(n), uploadId: decodeURIComponent(uploadId) }),
         { method: 'PUT', headers: { 'content-length': String(bytesRead) }, body: buf.subarray(0, bytesRead) },
       );
       if (!res.ok) throw new Error(`R2 part ${n} failed (${res.status})`);
@@ -153,7 +151,7 @@ async function uploadFile(client, r2, destKey, srcFile, size) {
     '<CompleteMultipartUpload>' +
     etags.map((p) => `<Part><PartNumber>${p.n}</PartNumber><ETag>${p.etag}</ETag></Part>`).join('') +
     '</CompleteMultipartUpload>';
-  const done = await client.fetch(objectUrl({ uploadId: decodeURIComponent(uploadId) }), {
+  const done = await client.fetch(urlFor({ uploadId: decodeURIComponent(uploadId) }), {
     method: 'POST',
     headers: { 'content-type': 'application/xml' },
     body: xml,
@@ -254,7 +252,7 @@ async function runJob(payload) {
     accessKeyId: r2.accessKeyId,
     secretAccessKey: r2.secretAccessKey,
     service: 's3',
-    region: 'auto',
+    region: r2.region || 'auto',
   });
 
   try {

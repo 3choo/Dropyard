@@ -1,7 +1,7 @@
 import { exports } from 'cloudflare:workers';
 import { strFromU8, unzipSync } from 'fflate';
 import { afterAll, beforeEach, describe, expect, it } from 'vitest';
-import { R2S3 } from '../src/lib/r2s3';
+import { S3Storage } from '../src/lib/s3';
 
 /**
  * Full-stack integration over the real Worker: bootstrap admin, login,
@@ -460,8 +460,8 @@ describe('health', () => {
 
 describe('R2 presigned downloads', () => {
   it('signs a short-lived GET for the object key', async () => {
-    const s3 = new R2S3({
-      R2_S3_ACCOUNT_ID: 'acct',
+    const s3 = new S3Storage({
+      S3_ENDPOINT: "https://acct.r2.cloudflarestorage.com",
       R2_BUCKET_NAME: 'gitctx',
       R2_ACCESS_KEY_ID: 'AKIDEXAMPLE',
       R2_SECRET_ACCESS_KEY: 'secret',

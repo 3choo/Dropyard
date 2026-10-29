@@ -13,6 +13,7 @@ import { listRefs } from './repo';
 import { Sha1, type Sha1State } from './sha1';
 import { GitStore } from './store';
 import { concatBytes } from './pkt';
+import { getBucket } from '../lib/storage';
 
 const CHUNK_BLOCKS = 64; // ~4 MB per R2 range read
 const WHOLE_MAX = 4 * 1024 * 1024;
@@ -119,7 +120,7 @@ export function presentStarter(s: StarterState | null) {
 
 /** Snapshot every ref, write the bundle header and small objects, and queue the blobs. */
 export async function startStarter(env: Env, pid: string, defaultBranch: string, userId: string): Promise<StarterState> {
-  const bucket = env.BUCKET;
+  const bucket = getBucket(env);
   const previous = await getStarter(bucket, pid);
   if (previous?.status === 'building' && previous.leaseUntil > Date.now()) {
     throw new StarterError('A starter download is already being prepared');
@@ -186,7 +187,7 @@ async function loadManifest(bucket: R2Bucket, pid: string, id: string): Promise<
 
 /** Fingerprint blobs for up to ~20 s; returns the updated state. */
 export async function starterStep(env: Env, pid: string, maxBytes = STEP_BYTES): Promise<StarterState> {
-  const bucket = env.BUCKET;
+  const bucket = getBucket(env);
   const state = await getStarter(bucket, pid);
   if (!state) throw new StarterError('No starter download has been started');
   if (state.status !== 'building') return state;

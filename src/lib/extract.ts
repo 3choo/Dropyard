@@ -3,8 +3,9 @@ import { Unzip, UnzipInflate, UnzipPassThrough, type UnzipFile } from 'fflate';
 import { concatBytes } from '../git/pkt';
 import { nowMs, randomId, sanitizeFilePath } from './ids';
 import { contentTypeForPath } from './mime';
-import { R2S3 } from './r2s3';
+import { S3Storage } from './s3';
 import { deleteUnreferencedObjects } from './r2refs';
+import { getBucket, s3Config } from './storage';
 
 const MB = 1024 * 1024;
 const EXTRACT_PART_BYTES = 8 * MB;
@@ -265,7 +266,7 @@ async function completeJob(env: Env, jobId: string): Promise<void> {
       .run();
     volumeKeys.push(volume.r2Key);
   }
-  await deleteUnreferencedObjects(env.DB, env.BUCKET, volumeKeys);
+  await deleteUnreferencedObjects(env.DB, getBucket(env), volumeKeys);
   await env.DB
     .prepare("UPDATE extract_jobs SET status = 'done', phase = 'finish', finished_at = ? WHERE id = ?")
     .bind(nowMs(), jobId)
@@ -289,7 +290,7 @@ async function cleanupExtractedFiles(env: Env, jobId: string): Promise<void> {
     .bind(jobId)
     .all<{ id: string; r2_key: string }>();
   if (rows.results.length > 0) {
-    await env.BUCKET.delete(rows.results.map((r) => r.r2_key));
+    await getBucket(env).delete(rows.results.map((r) => r.r2_key));
     await env.DB.prepare('DELETE FROM release_files WHERE extract_job_id = ?').bind(jobId).run();
   }
   await env.DB.prepare('UPDATE extract_jobs SET files_added = 0, bytes_added = 0 WHERE id = ?').bind(jobId).run();
@@ -355,7 +356,7 @@ async function runZipExtraction(
   await markRunning(env.DB, jobId);
   const archive = volumes[0]!;
   const caps = unpackCaps(env);
-  const s3 = new R2S3(env);
+  const s3 = new S3Storage(env);
   let liveUploadId: string | null = null;
   let liveKey: string | null = null;
 
@@ -377,7 +378,7 @@ async function runZipExtraction(
 
   let archiveSize = 0;
   try {
-    const obj = await env.BUCKET.get(archive.r2Key);
+    const obj = await getBucket(env).get(archive.r2Key);
     if (!obj) throw new Error('The zip object is no longer in storage');
     archiveSize = obj.size;
     const base = archive.path.split('/').pop() ?? archive.path;
@@ -459,7 +460,7 @@ async function runZipExtraction(
         pending = [];
         pendingLen = 0;
         if (final && uploadId === null) {
-          await env.BUCKET.put(destKey, chunk, { httpMetadata: { contentType } });
+          await getBucket(env).put(destKey, chunk, { httpMetadata: { contentType } });
           await insertExtractedFile(env, jobId, releaseId, destKey, clean, chunk.length, contentType, caps);
           progress.entries += 1;
           return;
@@ -498,7 +499,7 @@ async function runZipExtraction(
           if (ended) return;
           ended = true;
           if (entryBytes === 0) {
-            await env.BUCKET.put(destKey, new Uint8Array(0), { httpMetadata: { contentType } });
+            await getBucket(env).put(destKey, new Uint8Array(0), { httpMetadata: { contentType } });
             await insertExtractedFile(env, jobId, releaseId, destKey, clean, 0, contentType, caps);
             progress.entries += 1;
             return;
@@ -524,9 +525,9 @@ async function runRarExtraction(
   try {
     const secret = env.EXTRACT_CALLBACK_SECRET;
     if (!secret) throw new Error('EXTRACT_CALLBACK_SECRET is not configured; RAR extraction is unavailable');
-    if (!env.R2_ACCESS_KEY_ID || !env.R2_SECRET_ACCESS_KEY) {
+    if (!s3Config(env)) {
       throw new Error(
-        'RAR extraction needs the R2 S3 credentials (R2_ACCESS_KEY_ID / R2_SECRET_ACCESS_KEY) so the container can read and write storage',
+        'RAR extraction needs S3 credentials (S3_ENDPOINT, S3_BUCKET, S3_ACCESS_KEY_ID, S3_SECRET_ACCESS_KEY) so the container can read and write storage',
       );
     }
     await env.DB
@@ -546,12 +547,7 @@ async function runRarExtraction(
       caps: unpackCaps(env),
       callbackUrl: `${origin}/api/internal/extract`,
       secret,
-      r2: {
-        accountId: env.R2_S3_ACCOUNT_ID,
-        bucket: env.R2_BUCKET_NAME,
-        accessKeyId: env.R2_ACCESS_KEY_ID,
-        secretAccessKey: env.R2_SECRET_ACCESS_KEY,
-      },
+      r2: s3Config(env),
     };
     const res = await runner.fetch('http://gitctx-extract/extract', {
       method: 'POST',

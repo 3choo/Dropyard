@@ -9,6 +9,7 @@ import { requireAuthAny, requireRole, requireSession, sessionUser, type AppEnv }
 import { MODE_EXEC, MODE_FILE } from '../git/objects';
 import { getRef, listFiles, readCommit, resolveCommit, updateRef } from '../git/repo';
 import { GitStore } from '../git/store';
+import { getBucket } from '../lib/storage';
 
 type ProjectRow = {
   id: string;
@@ -256,9 +257,9 @@ projectRoutes.delete('/:slug', requireRole('admin'), async (c) => {
   const project = await loadProject(c);
   let cursor: string | undefined;
   do {
-    const listing = await c.env.BUCKET.list({ prefix: `p/${project.id}/`, cursor });
+    const listing = await getBucket(c.env).list({ prefix: `p/${project.id}/`, cursor });
     if (listing.objects.length > 0) {
-      await c.env.BUCKET.delete(listing.objects.map((o) => o.key));
+      await getBucket(c.env).delete(listing.objects.map((o) => o.key));
     }
     cursor = listing.truncated ? listing.cursor : undefined;
   } while (cursor);
@@ -417,7 +418,7 @@ projectRoutes.get('/:slug/releases/:version/blob', requireAuthAny(), async (c) =
     if (file.size > MAX_TEXT_BLOB_BYTES) {
       return c.json({ kind: 'text', ...meta, content: null, truncated: true });
     }
-    const obj = await c.env.BUCKET.get(file.r2_key);
+    const obj = await getBucket(c.env).get(file.r2_key);
     if (!obj) throw notFound('Stored object is missing; contact an admin');
     try {
       const content = new TextDecoder('utf-8', { fatal: true, ignoreBOM: false }).decode(await obj.arrayBuffer());
@@ -470,7 +471,7 @@ projectRoutes.post('/:slug/releases/:version/fork', requireRole('admin', 'upload
     .run();
   if (editPath && editBytes) {
     const r2Key = await writeKeyFor(c.env.DB, project.id, id, editPath);
-    await c.env.BUCKET.put(r2Key, editBytes, { httpMetadata: { contentType: contentTypeForPath(editPath) } });
+    await getBucket(c.env).put(r2Key, editBytes, { httpMetadata: { contentType: contentTypeForPath(editPath) } });
     const digest = await sha256Hex(editBytes);
     await upsertTextFile(c.env.DB, id, editPath, r2Key, editBytes.byteLength, digest, now).run();
   }
@@ -501,11 +502,11 @@ projectRoutes.put('/:slug/releases/:version/files/content', requireRole('admin',
     .bind(release.id, path)
     .first<{ id: string; r2_key: string }>();
   const r2Key = await writeKeyFor(c.env.DB, project.id, release.id, path, existing?.id ?? undefined);
-  await c.env.BUCKET.put(r2Key, bytes, { httpMetadata: { contentType: contentTypeForPath(path) } });
+  await getBucket(c.env).put(r2Key, bytes, { httpMetadata: { contentType: contentTypeForPath(path) } });
   const digest = await sha256Hex(bytes);
   const now = nowMs();
   await upsertTextFile(c.env.DB, release.id, path, r2Key, bytes.byteLength, digest, now).run();
-  if (existing) c.executionCtx.waitUntil(deleteUnreferencedObjects(c.env.DB, c.env.BUCKET, [existing.r2_key]));
+  if (existing) c.executionCtx.waitUntil(deleteUnreferencedObjects(c.env.DB, getBucket(c.env), [existing.r2_key]));
   await touchProject(c.env.DB, project.id).run();
   await audit(c.env.DB, sessionUser(c).email, 'file.edit', `project:${project.slug}/v${release.version}/${path}`, {
     size: bytes.byteLength,
@@ -623,11 +624,11 @@ projectRoutes.delete('/:slug/releases/:version', requireRole('admin', 'uploader'
   await c.env.DB.prepare('DELETE FROM releases WHERE id = ?').bind(release.id).run();
   let cursor: string | undefined;
   do {
-    const listing = await c.env.BUCKET.list({ prefix: `p/${project.id}/r/${release.id}`, cursor });
+    const listing = await getBucket(c.env).list({ prefix: `p/${project.id}/r/${release.id}`, cursor });
     for (const o of listing.objects) keys.push(o.key);
     cursor = listing.truncated ? listing.cursor : undefined;
   } while (cursor);
-  await deleteUnreferencedObjects(c.env.DB, c.env.BUCKET, keys);
+  await deleteUnreferencedObjects(c.env.DB, getBucket(c.env), keys);
   await audit(c.env.DB, user.email, 'release.delete', `project:${project.slug}/v${release.version}`);
   return c.json({ ok: true });
 });
