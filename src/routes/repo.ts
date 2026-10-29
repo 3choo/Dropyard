@@ -1,6 +1,6 @@
 import { Hono, type Context } from 'hono';
 import { audit } from '../lib/audit';
-import { badRequest, conflict, notFound, tooLarge } from '../lib/http';
+import { attachment, badRequest, conflict, notFound, tooLarge } from '../lib/http';
 import { nowMs, sanitizeFilePath } from '../lib/ids';
 import { contentTypeForPath, MAX_TEXT_BLOB_BYTES } from '../lib/mime';
 import { requireRole, requireSession, sessionUser, type AppEnv } from '../middleware';
@@ -17,6 +17,7 @@ import {
   signatureNow,
 } from '../git/objects';
 import {
+  countCommits,
   createCommit,
   diffTrees,
   getCommitRow,
@@ -36,16 +37,13 @@ import {
 } from '../git/repo';
 import { StarterError, getStarter, parseRange, presentStarter, startStarter, starterStep, starterStream } from '../git/starter';
 import { GitStore } from '../git/store';
-import { getProjectBySlug, type ProjectRow } from './projects';
+import { isProtectedBranch, loadProject as loadProjectRow, type ProjectRow } from './projects';
 
 /** Web API over each project's Git repository: browse, history, diffs, web edits. */
 export const repoRoutes = new Hono<AppEnv>();
 
-type Project = ProjectRow & { default_branch: string; protect_default: number };
-
-async function loadProject(c: Context<AppEnv>): Promise<{ project: Project; store: GitStore }> {
-  const project = (await getProjectBySlug(c.env.DB, c.req.param('slug') ?? '')) as Project | null;
-  if (!project) throw notFound('Project not found');
+async function loadProject(c: Context<AppEnv>): Promise<{ project: ProjectRow; store: GitStore }> {
+  const project = await loadProjectRow(c);
   return { project, store: new GitStore(c.env, project.id) };
 }
 
@@ -79,30 +77,23 @@ function entryKind(mode: string): 'tree' | 'blob' | 'symlink' | 'submodule' {
 const README_RE = /^readme(\.(md|markdown|txt))?$/i;
 
 repoRoutes.get('/:slug/repo', requireSession(), async (c) => {
-  const { project, store } = await loadProject(c);
+  const { project } = await loadProject(c);
   const refs = await listRefs(c.env.DB, project.id);
   const branches = refs.filter((r) => r.name.startsWith('refs/heads/'));
   const tags = refs.filter((r) => r.name.startsWith('refs/tags/'));
-  const headSha = branches.find((b) => b.name === `refs/heads/${project.default_branch}`)?.sha ?? null;
-  const head = headSha ? await getCommitRow(c.env.DB, project.id, headSha) : null;
-  const tipRows = await Promise.all(branches.map((b) => getCommitRow(c.env.DB, project.id, b.sha)));
-  const published = await c.env.DB
-    .prepare("SELECT COUNT(*) AS n FROM releases WHERE project_id = ? AND status = 'published'")
-    .bind(project.id)
-    .first<{ n: number }>();
-  const commitCount = headSha
-    ? (
-        await c.env.DB
-          .prepare(
-            `WITH RECURSIVE anc(sha) AS (SELECT ?2 UNION SELECT p.parent FROM git_commit_parents p JOIN anc ON p.sha = anc.sha WHERE p.project_id = ?1)
-             SELECT COUNT(*) AS n FROM anc`,
-          )
-          .bind(project.id, headSha)
-          .first<{ n: number }>()
-      )?.n ?? 0
-    : 0;
+  const headIndex = branches.findIndex((b) => b.name === `refs/heads/${project.default_branch}`);
+  const headSha = branches[headIndex]?.sha ?? null;
+  const [tipRows, published, commitCount, importRow] = await Promise.all([
+    Promise.all(branches.map((b) => getCommitRow(c.env.DB, project.id, b.sha))),
+    c.env.DB
+      .prepare("SELECT COUNT(*) AS n FROM releases WHERE project_id = ? AND status = 'published'")
+      .bind(project.id)
+      .first<{ n: number }>(),
+    headSha ? countCommits(c.env.DB, project.id, headSha) : 0,
+    getImport(c.env.DB, project.id),
+  ]);
+  const head = tipRows[headIndex] ?? null;
   const origin = new URL(c.req.url).origin;
-  void store;
   return c.json({
     defaultBranch: project.default_branch,
     protectDefault: project.protect_default === 1,
@@ -116,7 +107,7 @@ repoRoutes.get('/:slug/repo', requireSession(), async (c) => {
       commit: tipRows[i] ? presentCommit(tipRows[i]!) : null,
     })),
     tags: tags.map((t) => ({ name: t.name.slice('refs/tags/'.length), sha: t.sha })),
-    import: presentImport(await getImport(c.env.DB, project.id)),
+    import: presentImport(importRow),
     canImport: refs.length === 0 && (published?.n ?? 0) > 0,
   });
 });
@@ -184,10 +175,9 @@ repoRoutes.get('/:slug/repo/raw', requireSession(), async (c) => {
   if (!entry || isTreeMode(entry.mode)) throw notFound('File not found at this ref');
   const meta = await store.meta(entry.sha);
   if (!meta) throw notFound('Stored object is missing; contact an admin');
-  const filename = path.split('/').pop()!.replaceAll('"', '');
   const headers = new Headers({
     'content-type': contentTypeForPath(path),
-    'content-disposition': `attachment; filename="${filename}"`,
+    'content-disposition': attachment(path.split('/').pop()!),
     'content-length': String(meta.size),
     'cache-control': 'private, max-age=0, must-revalidate',
     etag: `"${entry.sha}"`,
@@ -287,7 +277,7 @@ repoRoutes.put('/:slug/repo/contents', requireRole('admin', 'uploader'), async (
     if (!validRefName(`refs/heads/${target}`)) throw badRequest('Invalid new branch name');
     if (await branchTip(store, target)) throw conflict(`A branch named "${target}" already exists`);
   }
-  if (target === project.default_branch && project.protect_default === 1) {
+  if (isProtectedBranch(project, target)) {
     throw conflict(`${target} is protected: commit to a new branch and open a pull request`);
   }
   const tip = await branchTip(store, branch);
@@ -328,7 +318,7 @@ repoRoutes.delete('/:slug/repo/contents', requireRole('admin', 'uploader'), asyn
   const body = await c.req.json<Record<string, unknown>>().catch(() => null);
   const branch = (typeof body?.branch === 'string' && body.branch) || project.default_branch;
   const message = typeof body?.message === 'string' ? body.message.trim() : '';
-  if (branch === project.default_branch && project.protect_default === 1) {
+  if (isProtectedBranch(project, branch)) {
     throw conflict(`${branch} is protected: commit to a new branch and open a pull request`);
   }
   const tip = await branchTip(store, branch);
@@ -442,7 +432,7 @@ repoRoutes.get('/:slug/repo/starter/download', requireSession(), async (c) => {
   const range = ifRange && ifRange !== etag ? null : parseRange(c.req.header('range'), state.size);
   const headers = new Headers({
     'content-type': 'application/x-git-bundle',
-    'content-disposition': `attachment; filename="${project.slug}.bundle"`,
+    'content-disposition': attachment(`${project.slug}.bundle`),
     'accept-ranges': 'bytes',
     etag,
     'cache-control': 'private, no-store',

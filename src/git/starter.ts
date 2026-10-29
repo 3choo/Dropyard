@@ -6,14 +6,14 @@
 // resumable steps; the download then re-frames blobs straight from R2.
 
 import { randomId } from '../lib/ids';
-import { adler32, encodeInMemory, entryHeader } from './packwrite';
+import { STORED_BLOCK as BLOCK, adler32, adlerTrailer, encodeInMemory, entryHeader, storedBlockHeader } from './packwrite';
 import { collectPack } from './protocol';
+import { toHex } from './objects';
 import { listRefs } from './repo';
 import { Sha1, type Sha1State } from './sha1';
 import { GitStore } from './store';
 import { concatBytes } from './pkt';
 
-const BLOCK = 65535;
 const CHUNK_BLOCKS = 64; // ~4 MB per R2 range read
 const WHOLE_MAX = 4 * 1024 * 1024;
 const STEP_MS = 20_000;
@@ -75,20 +75,11 @@ function frame(data: Uint8Array, first: number, size: number): Uint8Array {
   let o = 0;
   for (let k = 0; k < n; k++) {
     const piece = data.subarray(k * BLOCK, (k + 1) * BLOCK);
-    const len = piece.length;
-    out[o] = first + k === total - 1 ? 1 : 0;
-    out[o + 1] = len & 0xff;
-    out[o + 2] = len >> 8;
-    out[o + 3] = ~len & 0xff;
-    out[o + 4] = (~len >> 8) & 0xff;
+    out.set(storedBlockHeader(piece.length, first + k === total - 1), o);
     out.set(piece, o + 5);
-    o += len + 5;
+    o += piece.length + 5;
   }
   return out;
-}
-
-function adlerBytes(a: number): Uint8Array {
-  return Uint8Array.from([(a >>> 24) & 0xff, (a >>> 16) & 0xff, (a >>> 8) & 0xff, a & 0xff]);
 }
 
 async function readRange(bucket: R2Bucket, key: string, offset: number, length: number): Promise<Uint8Array> {
@@ -241,7 +232,7 @@ export async function starterStep(env: Env, pid: string, maxBytes = STEP_BYTES):
         budget -= length;
         if (state.blobOffset < size) continue;
       }
-      sha.update(adlerBytes(state.adler));
+      sha.update(adlerTrailer(state.adler));
       state.adlers.push(state.adler);
       state.cursor++;
       state.blobOffset = 0;
@@ -251,7 +242,7 @@ export async function starterStep(env: Env, pid: string, maxBytes = STEP_BYTES):
 
     if (state.cursor >= manifest.blobs.length) {
       const trailer = sha.digest();
-      state.trailer = [...trailer].map((b) => b.toString(16).padStart(2, '0')).join('');
+      state.trailer = toHex(trailer);
       state.size = state.headLen + manifest.blobs.reduce((s, b) => s + encodedSize(b[1]), 0) + 20;
       state.status = 'ready';
       state.sha = null;
@@ -389,7 +380,7 @@ async function* generate(
     }
     whole.delete(i);
     if (pos < to) {
-      const tail = clip(adlerBytes(state.adlers[i]!), tailStart);
+      const tail = clip(adlerTrailer(state.adlers[i]!), tailStart);
       if (tail) {
         yield tail;
         pos += tail.length;

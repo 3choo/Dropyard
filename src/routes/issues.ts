@@ -18,13 +18,11 @@ import {
   validRefName,
 } from '../git/repo';
 import { GitStore } from '../git/store';
-import { getProjectBySlug, type ProjectRow } from './projects';
+import { isProtectedBranch, loadProject, type ProjectRow } from './projects';
 import { presentCommit } from './repo';
 
 /** Issues, pull requests, reviews and comments. */
 export const issueRoutes = new Hono<AppEnv>();
-
-type Project = ProjectRow & { default_branch: string; protect_default: number };
 
 type IssueRow = {
   id: string;
@@ -48,13 +46,7 @@ type IssueRow = {
   merged_at: number | null;
 };
 
-async function loadProject(c: Context<AppEnv>): Promise<Project> {
-  const project = (await getProjectBySlug(c.env.DB, c.req.param('slug') ?? '')) as Project | null;
-  if (!project) throw notFound('Project not found');
-  return project;
-}
-
-async function loadIssue(c: Context<AppEnv>, project: Project): Promise<IssueRow> {
+async function loadIssue(c: Context<AppEnv>, project: ProjectRow): Promise<IssueRow> {
   const number = parseInt(c.req.param('number') ?? '', 10);
   const row = await c.env.DB
     .prepare('SELECT * FROM issues WHERE project_id = ? AND number = ?')
@@ -114,7 +106,7 @@ async function addEvent(db: D1Database, issueId: string, actorId: string | null,
 
 async function createNumbered(
   db: D1Database,
-  project: Project,
+  project: ProjectRow,
   fields: { kind: 'issue' | 'pull'; title: string; body: string; authorId: string; head?: string; base?: string; headSha?: string; baseSha?: string },
 ): Promise<IssueRow> {
   for (let attempt = 0; attempt < 3; attempt++) {
@@ -159,8 +151,10 @@ type PullStatus = {
 };
 
 async function pullStatus(store: GitStore, pr: IssueRow): Promise<PullStatus> {
-  const head = await getRef(store.db, store.projectId, `refs/heads/${pr.head_branch}`);
-  const base = await getRef(store.db, store.projectId, `refs/heads/${pr.base_branch}`);
+  const [head, base] = await Promise.all([
+    getRef(store.db, store.projectId, `refs/heads/${pr.head_branch}`),
+    getRef(store.db, store.projectId, `refs/heads/${pr.base_branch}`),
+  ]);
   // A merged or closed pull request shows the range it had when it ended,
   // not whatever the branches point at now.
   const frozen = pr.state !== 'open';
@@ -178,11 +172,12 @@ async function pullStatus(store: GitStore, pr: IssueRow): Promise<PullStatus> {
   status.mergeBase = await mergeBase(store.db, store.projectId, status.baseSha, status.headSha);
   const count = async (tip: string, exclude: string | null) =>
     (await logCommits(store.db, store.projectId, tip, { limit: 1000, exclude })).length;
-  status.ahead = await count(status.headSha, status.mergeBase);
-  status.behind = await count(status.baseSha, status.mergeBase);
-  if (pr.state === 'open' && head && base) {
-    if (status.ahead === 0) status.mergeable = false;
-    else if (status.behind === 0) status.mergeable = true;
+  [status.ahead, status.behind] = await Promise.all([
+    count(status.headSha, status.mergeBase),
+    count(status.baseSha, status.mergeBase),
+  ]);
+  if (pr.state === 'open' && head && base && status.ahead > 0) {
+    if (status.behind === 0) status.mergeable = true;
     else {
       const [b, o, t] = await Promise.all([
         status.mergeBase ? readCommit(store, status.mergeBase) : null,
@@ -195,6 +190,16 @@ async function pullStatus(store: GitStore, pr: IssueRow): Promise<PullStatus> {
     }
   }
   return status;
+}
+
+/** Each reviewer's latest verdict: approvals (not counting the PR's author) and change requests. */
+function reviewTally(reviews: { author_id: string | null; state: string }[], prAuthor: string | null) {
+  const latest = new Map<string, string>();
+  for (const r of reviews) if (r.author_id && r.state !== 'commented') latest.set(r.author_id, r.state);
+  return {
+    approvals: [...latest.entries()].filter(([who, s]) => s === 'approved' && who !== prAuthor).length,
+    changesRequested: [...latest.values()].filter((s) => s === 'changes_requested').length,
+  };
 }
 
 /** A PR merged outside gitctx (pushed from GitHub Desktop) is marked merged when seen. */
@@ -317,16 +322,11 @@ issueRoutes.get('/:slug/issues/:number', requireSession(), async (c) => {
     const commits = status.headSha
       ? await logCommits(c.env.DB, project.id, status.headSha, { limit: 250, exclude: status.mergeBase })
       : [];
-    const latest = new Map<string, string>();
-    for (const r of reviews.results) if (r.author_id && r.state !== 'commented') latest.set(r.author_id, r.state);
-    const approvals = [...latest.entries()].filter(([who, s]) => s === 'approved' && who !== issue.author_id).length;
-    const changesRequested = [...latest.values()].filter((s) => s === 'changes_requested').length;
     pull = {
       ...status,
       commits: commits.map(presentCommit),
-      approvals,
-      changesRequested,
-      requiresApproval: project.protect_default === 1 && issue.base_branch === project.default_branch,
+      ...reviewTally(reviews.results, issue.author_id),
+      requiresApproval: isProtectedBranch(project, issue.base_branch),
     };
   }
 
@@ -577,15 +577,14 @@ issueRoutes.post('/:slug/pulls/:number/merge', requireRole('admin', 'uploader'),
       `This branch has conflicts with ${pr.base_branch} (${status.conflicts.slice(0, 5).join(', ')}). In GitHub Desktop, merge ${pr.base_branch} into ${pr.head_branch}, resolve, and push.`,
     );
   }
-  if (project.protect_default === 1 && pr.base_branch === project.default_branch) {
+  if (isProtectedBranch(project, pr.base_branch)) {
     const reviews = await c.env.DB
       .prepare("SELECT author_id, state FROM reviews WHERE issue_id = ? AND state != 'commented' ORDER BY created_at")
       .bind(pr.id)
       .all<{ author_id: string | null; state: string }>();
-    const latest = new Map<string, string>();
-    for (const r of reviews.results) if (r.author_id) latest.set(r.author_id, r.state);
-    const approved = [...latest.entries()].some(([who, s]) => s === 'approved' && who !== pr.author_id);
-    const blocked = [...latest.values()].includes('changes_requested');
+    const tally = reviewTally(reviews.results, pr.author_id);
+    const approved = tally.approvals > 0;
+    const blocked = tally.changesRequested > 0;
     if ((!approved || blocked) && !(user.role === 'admin' && body?.bypass === true)) {
       throw forbidden(blocked ? 'Changes were requested; get a new approval first' : `${pr.base_branch} requires an approving review before merging`);
     }

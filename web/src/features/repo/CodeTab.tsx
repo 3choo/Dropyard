@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { Link, useNavigate, useParams, useSearchParams } from 'react-router';
 import { useQuery } from '@tanstack/react-query';
-import { ApiError, api } from '../../api/client';
+import { api, errMsg } from '../../api/client';
 import { Markdown } from '../../components/Markdown';
 import { Button, CopyButton, EmptyState, Select, toast } from '../../components/ui';
 import { IconBranch, IconFile, IconFolder, IconHistory, IconPlus, IconTag, IconUpload } from '../../components/icons';
@@ -164,7 +164,7 @@ export function CodeTab() {
         <EmptyState
           icon={<IconFolder />}
           title="Nothing here"
-          body={tree.error instanceof ApiError ? tree.error.message : 'This path does not exist at this ref.'}
+          body={errMsg(tree.error, 'This path does not exist at this ref.')}
         />
       ) : !data ? (
         <p className="text-[13px] text-ink-3">Loading…</p>
@@ -268,7 +268,7 @@ function ImportCard({ repo, onDone }: { repo: RepoSummary; onDone: () => void })
         if (res.import.status !== 'running') break;
       }
     } catch (err) {
-      toast(err instanceof ApiError ? err.message : 'Import step failed — you can resume it', 'err');
+      toast(errMsg(err, 'Import step failed — you can resume it'), 'err');
     } finally {
       running.current = false;
       setBusy(false);
@@ -285,7 +285,7 @@ function ImportCard({ repo, onDone }: { repo: RepoSummary; onDone: () => void })
       setState(res.import);
       void drive();
     } catch (err) {
-      toast(err instanceof ApiError ? err.message : 'Could not start the import', 'err');
+      toast(errMsg(err, 'Could not start the import'), 'err');
     }
   };
 

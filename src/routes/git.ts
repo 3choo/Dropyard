@@ -1,14 +1,6 @@
 import { Hono, type Context } from 'hono';
 import { audit } from '../lib/audit';
-import {
-  clearLoginAttempts,
-  loginBlocked,
-  recordLoginFailure,
-  resolveUserToken,
-  verifyPassword,
-  type Role,
-  type SessionUser,
-} from '../lib/auth';
+import { checkPassword, clientIp, resolveUserToken, type SessionUser } from '../lib/auth';
 import { nowMs } from '../lib/ids';
 import { resolveToken, type AppEnv } from '../middleware';
 import {
@@ -19,7 +11,7 @@ import {
   uploadPackV2,
   type RepoInfo,
 } from '../git/protocol';
-import { pkt, FLUSH } from '../git/pkt';
+import { concatBytes, pkt, FLUSH } from '../git/pkt';
 import { GitStore } from '../git/store';
 
 /**
@@ -70,18 +62,9 @@ async function authenticate(c: Context<AppEnv>): Promise<GitAuth | null> {
   // Fall back to email + account password (rate limited like the login form).
   const email = username.trim().toLowerCase();
   if (!email.includes('@')) return null;
-  const ip = c.req.header('cf-connecting-ip') ?? 'unknown';
-  if (await loginBlocked(c.env.DB, email, ip)) return null;
-  const row = await c.env.DB
-    .prepare('SELECT id, email, name, role, password_hash FROM users WHERE email = ?')
-    .bind(email)
-    .first<{ id: string; email: string; name: string; role: Role; password_hash: string }>();
-  if (!row || !(await verifyPassword(secret, row.password_hash))) {
-    await recordLoginFailure(c.env.DB, email, ip);
-    return null;
-  }
-  await clearLoginAttempts(c.env.DB, email, ip);
-  return { user: { id: row.id, email: row.email, name: row.name, role: row.role }, tokenProjectId: null, canRead: true };
+  const account = await checkPassword(c.env.DB, email, secret, clientIp(c.req.raw));
+  if (!account || account === 'blocked') return null;
+  return { user: account, tokenProjectId: null, canRead: true };
 }
 
 type RepoRow = { id: string; slug: string; default_branch: string; protect_default: number };
@@ -114,13 +97,7 @@ async function readAll(stream: ReadableStream<Uint8Array> | null, limit: number)
     if (total > limit) throw new GitProtocolError('request too large');
     parts.push(value);
   }
-  const out = new Uint8Array(total);
-  let o = 0;
-  for (const p of parts) {
-    out.set(p, o);
-    o += p.length;
-  }
-  return out;
+  return concatBytes(parts);
 }
 
 const NO_CACHE = {

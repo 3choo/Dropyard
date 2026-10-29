@@ -1,4 +1,4 @@
-import { Navigate, Route, RouterProvider, createBrowserRouter, useLocation } from 'react-router';
+import { Navigate, RouterProvider, createBrowserRouter, useLocation } from 'react-router';
 import { Suspense, lazy } from 'react';
 import { useAuth } from './auth/AuthProvider';
 import { Spinner } from './components/ui';

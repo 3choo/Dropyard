@@ -1,29 +1,23 @@
 import { Hono } from 'hono';
 import {
-  clearLoginAttempts,
+  checkPassword,
   clearSessionCookie,
+  clientIp,
   createSession,
   deleteSession,
   hashPassword,
-  loginBlocked,
-  recordLoginFailure,
+  parseSessionCookie,
   resolveSession,
-  SESSION_COOKIE,
   sessionCookie,
   setCookie,
-  verifyPassword,
   type Role,
 } from '../lib/auth';
 import { ApiError, badRequest, conflict, forbidden, notFound, unauthorized } from '../lib/http';
-import { nowMs, randomToken } from '../lib/ids';
+import { nowMs } from '../lib/ids';
 import { audit } from '../lib/audit';
 import { requireSession, sessionUser, type AppEnv } from '../middleware';
 
 const ROLES: Role[] = ['admin', 'uploader', 'viewer'];
-
-function clientIp(req: Request): string {
-  return req.headers.get('cf-connecting-ip') ?? 'unknown';
-}
 
 function validEmail(email: string): boolean {
   return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) && email.length <= 200;
@@ -38,17 +32,9 @@ export const authRoutes = new Hono<AppEnv>();
 authRoutes.get('/status', async (c) => {
   const users = await c.env.DB.prepare('SELECT COUNT(*) AS n FROM users').first<{ n: number }>();
   const needsSetup = (users?.n ?? 0) === 0;
-  const cookie = c.req.raw.headers.get('cookie') ?? '';
-  const token = cookie
-    .split(';')
-    .map((s) => s.trim())
-    .find((s) => s.startsWith(`${SESSION_COOKIE}=`))
-    ?.slice(SESSION_COOKIE.length + 1);
-  let user = null;
-  if (token) {
-    user = await resolveSession(c.env.DB, token);
-  }
-  return c.json({ needsSetup, authenticated: !!user, user });
+  const token = parseSessionCookie(c.req.header('cookie'));
+  const user = token ? await resolveSession(c.env.DB, token) : null;
+  return c.json({ needsSetup, user });
 });
 
 authRoutes.post('/setup', async (c) => {
@@ -79,19 +65,14 @@ authRoutes.post('/login', async (c) => {
   if (!email || !password) throw badRequest('Email and password are required');
   const normalized = email.toLowerCase();
   const ip = clientIp(c.req.raw);
-  if (await loginBlocked(c.env.DB, normalized, ip)) {
+  const user = await checkPassword(c.env.DB, normalized, password, ip);
+  if (user === 'blocked') {
     throw new ApiError(429, 'rate_limited', 'Too many failed attempts. Try again in a few minutes.');
   }
-  const user = await c.env.DB
-    .prepare('SELECT id, email, name, role, password_hash FROM users WHERE email = ?')
-    .bind(normalized)
-    .first<{ id: string; email: string; name: string; role: Role; password_hash: string }>();
-  if (!user || !(await verifyPassword(password, user.password_hash))) {
-    await recordLoginFailure(c.env.DB, normalized, ip);
+  if (!user) {
     await audit(c.env.DB, normalized, 'user.login_failed', `ip:${ip}`);
     throw unauthorized('Email or password is incorrect');
   }
-  await clearLoginAttempts(c.env.DB, normalized, ip);
   await c.env.DB.prepare('UPDATE users SET last_login_at = ? WHERE id = ?').bind(nowMs(), user.id).run();
   const token = await createSession(c.env.DB, user.id);
   await audit(c.env.DB, user.email, 'user.login', `user:${user.id}`, { ip });
@@ -100,12 +81,7 @@ authRoutes.post('/login', async (c) => {
 });
 
 authRoutes.post('/logout', async (c) => {
-  const cookie = c.req.raw.headers.get('cookie') ?? '';
-  const token = cookie
-    .split(';')
-    .map((s) => s.trim())
-    .find((s) => s.startsWith(`${SESSION_COOKIE}=`))
-    ?.slice(SESSION_COOKIE.length + 1);
+  const token = parseSessionCookie(c.req.header('cookie'));
   if (token) await deleteSession(c.env.DB, token);
   setCookie(c, clearSessionCookie());
   return c.json({ ok: true });

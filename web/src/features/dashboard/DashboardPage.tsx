@@ -2,7 +2,7 @@ import { useEffect, useState, type FormEvent } from 'react';
 import { Link, useNavigate, useSearchParams } from 'react-router';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { motion } from 'motion/react';
-import { ApiError, api } from '../../api/client';
+import { api, errMsg } from '../../api/client';
 import { useAuth } from '../../auth/AuthProvider';
 import { Button, Chip, EmptyState, Input, Modal, Textarea, toast } from '../../components/ui';
 import { IconFolder, IconPlus } from '../../components/icons';
@@ -158,7 +158,7 @@ function NewProjectModal({
       onClose();
       onCreated(res.project.slug);
     },
-    onError: (err) => toast(err instanceof ApiError ? err.message : 'Could not create the project', 'err'),
+    onError: (err) => toast(errMsg(err, 'Could not create the project'), 'err'),
   });
 
   const submit = (e: FormEvent) => {

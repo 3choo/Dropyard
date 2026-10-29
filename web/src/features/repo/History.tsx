@@ -1,8 +1,8 @@
 import { useState, type FormEvent } from 'react';
 import { Link, useNavigate, useParams, useSearchParams } from 'react-router';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { ApiError, api } from '../../api/client';
-import { Button, Chip, CopyButton, EmptyState, Input, Spinner, Textarea, toast } from '../../components/ui';
+import { api, errMsg } from '../../api/client';
+import { Button, Chip, CopyButton, EmptyState, Input, Loading, Textarea, toast } from '../../components/ui';
 import { IconBranch, IconCommit, IconPullRequest, IconTag, IconTrash } from '../../components/icons';
 import { formatDate, timeAgo } from '../../lib/format';
 import { useProject } from '../project/ProjectPage';
@@ -10,14 +10,6 @@ import { Avatar, RefPicker } from './CodeTab';
 import { CommentThread, DiffStat, DiffView } from './DiffView';
 import { apiQuery, commitUrl, commitsUrl, compareUrl, treeUrl } from './links';
 import type { Commit, LineComment, PatchedFile } from './types';
-
-function Loading() {
-  return (
-    <div className="flex items-center gap-2 py-10 text-[13px] text-ink-3">
-      <Spinner /> Loading…
-    </div>
-  );
-}
 
 function dayLabel(ts: number) {
   return new Date(ts).toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' });
@@ -100,7 +92,7 @@ export function CommitsTab() {
         <RefPicker repo={repo} value={refName} onChange={(r) => navigate(commitsUrl(slug, r === repo.defaultBranch ? null : r))} />
       </div>
       {log.isError ? (
-        <p className="text-[13px] text-danger">{log.error instanceof ApiError ? log.error.message : 'Could not load history'}</p>
+        <p className="text-[13px] text-danger">{errMsg(log.error, 'Could not load history')}</p>
       ) : !log.data ? (
         <Loading />
       ) : (
@@ -139,11 +131,11 @@ export function CommitPage() {
     mutationFn: (input: { body: string; path?: string; line?: number; side?: string }) =>
       api(`/api/projects/${slug}/repo/commits/${sha}/comments`, { method: 'POST', body: JSON.stringify(input) }),
     onSuccess: () => void qc.invalidateQueries({ queryKey: ['commit-comments', slug, sha] }),
-    onError: (err) => toast(err instanceof ApiError ? err.message : 'Comment failed', 'err'),
+    onError: (err) => toast(errMsg(err, 'Comment failed'), 'err'),
   });
 
   if (data.isError) {
-    return <EmptyState icon={<IconCommit />} title="Commit not found" body={data.error instanceof ApiError ? data.error.message : ''} />;
+    return <EmptyState icon={<IconCommit />} title="Commit not found" body={errMsg(data.error, '')} />;
   }
   if (!data.data) return <Loading />;
   const { commit, files, branches } = data.data;
@@ -252,7 +244,7 @@ export function ComparePage() {
         body: JSON.stringify({ title: title || cmp.data?.commits[0]?.subject || head, body, head, base }),
       }),
     onSuccess: (res) => navigate(`/p/${slug}/pulls/${res.number}`),
-    onError: (err) => toast(err instanceof ApiError ? err.message : 'Could not open the pull request', 'err'),
+    onError: (err) => toast(errMsg(err, 'Could not open the pull request'), 'err'),
   });
 
   if (!repo) return <Loading />;
@@ -271,7 +263,7 @@ export function ComparePage() {
       </div>
 
       {!head ? null : cmp.isError ? (
-        <p className="mt-4 text-[13px] text-danger">{cmp.error instanceof ApiError ? cmp.error.message : 'Compare failed'}</p>
+        <p className="mt-4 text-[13px] text-danger">{errMsg(cmp.error, 'Compare failed')}</p>
       ) : !cmp.data ? (
         <Loading />
       ) : cmp.data.commits.length === 0 ? (
@@ -336,12 +328,12 @@ export function BranchesPage() {
       setName('');
       refetchRepo();
     },
-    onError: (err) => toast(err instanceof ApiError ? err.message : 'Could not create branch', 'err'),
+    onError: (err) => toast(errMsg(err, 'Could not create branch'), 'err'),
   });
   const remove = useMutation({
     mutationFn: (branch: string) => api(`/api/projects/${slug}/repo/branches/${branch}`, { method: 'DELETE' }),
     onSuccess: () => refetchRepo(),
-    onError: (err) => toast(err instanceof ApiError ? err.message : 'Could not delete branch', 'err'),
+    onError: (err) => toast(errMsg(err, 'Could not delete branch'), 'err'),
   });
   if (!repo) return <Loading />;
   return (

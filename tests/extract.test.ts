@@ -36,7 +36,7 @@ async function call(
 
 beforeEach(async () => {
   if (!adminCookie) {
-    const { res, body } = await call('/api/auth/setup', {
+    const { res } = await call('/api/auth/setup', {
       method: 'POST',
       body: JSON.stringify({ name: 'Root', email: 'root@team.gg', password: 'correct-horse-battery' }),
     });

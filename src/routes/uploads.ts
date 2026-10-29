@@ -1,4 +1,4 @@
-import { Hono } from 'hono';
+import { Hono, type Context } from 'hono';
 import { audit } from '../lib/audit';
 import { maybeStartExtraction } from '../lib/extract';
 import { badRequest, conflict, notFound, tooLarge } from '../lib/http';
@@ -29,6 +29,21 @@ async function loadUpload(db: D1Database, id: string): Promise<UploadRow> {
   return row;
 }
 
+type PresignedUpload = UploadRow & { mode: 'presigned'; s3_upload_id: string };
+
+async function loadPresignedUpload(db: D1Database, id: string): Promise<PresignedUpload> {
+  const upload = await loadUpload(db, id);
+  if (upload.status === 'completed') throw conflict('Upload already completed');
+  if (upload.status !== 'active') throw conflict(`Upload is ${upload.status}`);
+  if (upload.mode !== 'presigned' || !upload.s3_upload_id) throw badRequest('Not a presigned multipart upload');
+  return upload as PresignedUpload;
+}
+
+/** The release-relative file path; upload keys are `p/<project>/r/<release>/<path>`. */
+function uploadPath(r2Key: string): string {
+  return r2Key.split('/').slice(4).join('/');
+}
+
 async function loadDraftRelease(db: D1Database, releaseId: string) {
   const row = await db
     .prepare(
@@ -51,11 +66,10 @@ function singleUploadLimit(env: Env): number {
 
 uploadRoutes.post('/', async (c) => {
   const body = await c.req.json<Record<string, unknown>>().catch(() => null);
-  const { releaseId, path, size, contentType, sha256 } = (body ?? {}) as {
+  const { releaseId, path, size, sha256 } = (body ?? {}) as {
     releaseId?: string;
     path?: string;
     size?: number;
-    contentType?: string;
     sha256?: string;
   };
   if (!releaseId || !path || typeof size !== 'number' || !Number.isInteger(size) || size < 0) {
@@ -127,9 +141,7 @@ uploadRoutes.post('/', async (c) => {
 });
 
 uploadRoutes.post('/:id/parts', async (c) => {
-  const upload = await loadUpload(c.env.DB, c.req.param('id'));
-  if (upload.status !== 'active') throw conflict(`Upload is ${upload.status}`);
-  if (upload.mode !== 'presigned' || !upload.s3_upload_id) throw badRequest('Not a presigned multipart upload');
+  const upload = await loadPresignedUpload(c.env.DB, c.req.param('id'));
   const body = await c.req
     .json<{ parts?: Array<{ n?: number; sha256?: string }>; contentType?: unknown }>()
     .catch(() => null);
@@ -141,14 +153,15 @@ uploadRoutes.post('/:id/parts', async (c) => {
     typeof body?.contentType === 'string' && body.contentType.length > 0 && body.contentType.length <= 255
       ? body.contentType
       : 'application/octet-stream';
-  const s3 = new R2S3(c.env);
-  const urls: Array<{ n: number; url: string }> = [];
   for (const p of parts) {
     if (typeof p.n !== 'number' || p.n < 1 || p.n > upload.total_parts || typeof p.sha256 !== 'string') {
       throw badRequest('Each part needs a number within range and a base64 SHA-256');
     }
-    urls.push({ n: p.n, url: await s3.presignPart(upload.r2_key, upload.s3_upload_id, p.n, contentType) });
   }
+  const s3 = new R2S3(c.env);
+  const urls = await Promise.all(
+    parts.map(async (p) => ({ n: p.n!, url: await s3.presignPart(upload.r2_key, upload.s3_upload_id, p.n!, contentType) })),
+  );
   return c.json({ urls });
 });
 
@@ -161,23 +174,12 @@ uploadRoutes.put('/:id/body', async (c) => {
   await c.env.BUCKET.put(upload.r2_key, c.req.raw.body, {
     httpMetadata: { contentType },
   });
-  await finalizeFile(c.env, upload, null, []);
-  await audit(c.env.DB, sessionUser(c).email, 'upload.complete', upload.r2_key, { size: upload.size, mode: 'single' });
-  const extraction = await maybeStartExtraction(c.env, (p) => c.executionCtx.waitUntil(p), {
-    origin: new URL(c.req.url).origin,
-    releaseId: upload.release_id,
-    path: upload.r2_key.split('/').slice(4).join('/'),
-    r2Key: upload.r2_key,
-    userId: sessionUser(c).id,
-  });
+  const extraction = await completeUpload(c, upload, null, []);
   return c.json({ ok: true, size: upload.size, extraction });
 });
 
 uploadRoutes.post('/:id/complete', async (c) => {
-  const upload = await loadUpload(c.env.DB, c.req.param('id'));
-  if (upload.status === 'completed') throw conflict('Upload already completed');
-  if (upload.status !== 'active') throw conflict(`Upload is ${upload.status}`);
-  if (upload.mode !== 'presigned' || !upload.s3_upload_id) throw badRequest('Not a presigned multipart upload');
+  const upload = await loadPresignedUpload(c.env.DB, c.req.param('id'));
   const body = await c.req.json<{ parts?: Array<{ n?: number; etag?: string; sha256?: string }> }>().catch(() => null);
   const parts = body?.parts;
   if (!Array.isArray(parts) || parts.length !== upload.total_parts) {
@@ -205,22 +207,12 @@ uploadRoutes.post('/:id/complete', async (c) => {
   }
   const partDigests = sorted.map((p) => ({ n: p.n!, sha256: p.sha256! }));
   const digest = await sha256Hex(partDigests.map((p) => p.sha256).join(''));
-  await finalizeFile(c.env, upload, digest, partDigests);
-  await audit(c.env.DB, sessionUser(c).email, 'upload.complete', upload.r2_key, { size: upload.size, mode: 'presigned' });
-  const extraction = await maybeStartExtraction(c.env, (p) => c.executionCtx.waitUntil(p), {
-    origin: new URL(c.req.url).origin,
-    releaseId: upload.release_id,
-    path: upload.r2_key.split('/').slice(4).join('/'),
-    r2Key: upload.r2_key,
-    userId: sessionUser(c).id,
-  });
+  const extraction = await completeUpload(c, upload, digest, partDigests);
   return c.json({ ok: true, size: upload.size, digest, extraction });
 });
 
 uploadRoutes.post('/:id/resume', async (c) => {
-  const upload = await loadUpload(c.env.DB, c.req.param('id'));
-  if (upload.status !== 'active') throw conflict(`Upload is ${upload.status}`);
-  if (upload.mode !== 'presigned' || !upload.s3_upload_id) throw badRequest('Not a presigned multipart upload');
+  const upload = await loadPresignedUpload(c.env.DB, c.req.param('id'));
   const s3 = new R2S3(c.env);
   const parts = await s3.listParts(upload.r2_key, upload.s3_upload_id);
   return c.json({ parts, partSize: upload.part_size, totalParts: upload.total_parts });
@@ -252,10 +244,28 @@ uploadRoutes.get('/', async (c) => {
   return c.json({
     uploads: rows.results.map((u) => ({
       ...u,
-      path: (u as { r2_key: string }).r2_key.split('/').slice(4).join('/'),
+      path: uploadPath((u as { r2_key: string }).r2_key),
     })),
   });
 });
+
+/** Records the stored object as a release file, audits it and starts extraction for archives. */
+async function completeUpload(
+  c: Context<AppEnv>,
+  upload: UploadRow,
+  digest: string | null,
+  partDigests: Array<{ n: number; sha256: string }>,
+) {
+  await finalizeFile(c.env, upload, digest, partDigests);
+  await audit(c.env.DB, sessionUser(c).email, 'upload.complete', upload.r2_key, { size: upload.size, mode: upload.mode });
+  return maybeStartExtraction(c.env, (p) => c.executionCtx.waitUntil(p), {
+    origin: new URL(c.req.url).origin,
+    releaseId: upload.release_id,
+    path: uploadPath(upload.r2_key),
+    r2Key: upload.r2_key,
+    userId: sessionUser(c).id,
+  });
+}
 
 async function finalizeFile(
   env: Env,
@@ -263,7 +273,7 @@ async function finalizeFile(
   digest: string | null,
   partDigests: Array<{ n: number; sha256: string }>,
 ): Promise<void> {
-  const path = upload.r2_key.split('/').slice(4).join('/');
+  const path = uploadPath(upload.r2_key);
   const fileRow = await env.DB
     .prepare('SELECT id FROM release_files WHERE release_id = ? AND path = ?')
     .bind(upload.release_id, path)

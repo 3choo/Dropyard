@@ -1,5 +1,6 @@
 import { getContainer, Container } from '@cloudflare/containers';
 import { Unzip, UnzipInflate, UnzipPassThrough, type UnzipFile } from 'fflate';
+import { concatBytes } from '../git/pkt';
 import { nowMs, randomId, sanitizeFilePath } from './ids';
 import { contentTypeForPath } from './mime';
 import { R2S3 } from './r2s3';
@@ -339,15 +340,6 @@ function noopSink(): EntrySink {
   return { write: async () => {}, end: async () => {} };
 }
 
-function concat(chunks: Uint8Array[], total: number): Uint8Array {
-  const out = new Uint8Array(total);
-  let offset = 0;
-  for (const chunk of chunks) {
-    out.set(chunk, offset);
-    offset += chunk.length;
-  }
-  return out;
-}
 
 function toArrayBuffer(bytes: Uint8Array): ArrayBuffer {
   return bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer;
@@ -463,7 +455,7 @@ async function runZipExtraction(
       };
 
       const flush = async (final: boolean): Promise<void> => {
-        const chunk = concat(pending, pendingLen);
+        const chunk = concatBytes(pending);
         pending = [];
         pendingLen = 0;
         if (final && uploadId === null) {

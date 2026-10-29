@@ -2,7 +2,7 @@ import { useState, type FormEvent } from 'react';
 import { useSearchParams } from 'react-router';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { motion } from 'motion/react';
-import { ApiError, api } from '../../api/client';
+import { api, errMsg } from '../../api/client';
 import { useAuth, type Role } from '../../auth/AuthProvider';
 import { Button, CopyButton, Input, Modal, Select, Spinner, toast } from '../../components/ui';
 import { formatDate, timeAgo } from '../../lib/format';
@@ -406,8 +406,4 @@ function Loading() {
       <Spinner className="h-4 w-4" />
     </div>
   );
-}
-
-function errMsg(e: unknown): string {
-  return e instanceof ApiError ? e.message : 'Something went wrong';
 }

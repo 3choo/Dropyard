@@ -1,5 +1,8 @@
 // Git object encoding: hashing, trees, commits, tags.
 
+import { createHash } from 'node:crypto';
+import { concatBytes } from './pkt';
+
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
 
@@ -32,11 +35,7 @@ export function fromHex(hex: string): Uint8Array {
 }
 
 export async function hashObject(type: ObjType, data: Uint8Array): Promise<string> {
-  const header = objectHeader(type, data.length);
-  const buf = new Uint8Array(header.length + data.length);
-  buf.set(header);
-  buf.set(data, header.length);
-  return toHex(new Uint8Array(await crypto.subtle.digest('SHA-1', buf)));
+  return createHash('sha1').update(objectHeader(type, data.length)).update(data).digest('hex');
 }
 
 export type TreeEntry = { mode: string; name: string; sha: string };
@@ -74,20 +73,9 @@ function compareBytes(a: Uint8Array, b: Uint8Array): number {
 export function serializeTree(entries: TreeEntry[]): Uint8Array {
   const keyed = entries.map((e) => ({ e, k: sortKey(e) }));
   keyed.sort((x, y) => compareBytes(x.k, y.k));
-  const parts: Uint8Array[] = [];
-  let total = 0;
-  for (const { e } of keyed) {
-    const head = encoder.encode(`${isTreeMode(e.mode) ? MODE_TREE : e.mode} ${e.name}\0`);
-    parts.push(head, fromHex(e.sha));
-    total += head.length + 20;
-  }
-  const out = new Uint8Array(total);
-  let o = 0;
-  for (const p of parts) {
-    out.set(p, o);
-    o += p.length;
-  }
-  return out;
+  return concatBytes(
+    keyed.flatMap(({ e }) => [encoder.encode(`${isTreeMode(e.mode) ? MODE_TREE : e.mode} ${e.name}\0`), fromHex(e.sha)]),
+  );
 }
 
 export type Signature = { name: string; email: string; time: number; tz: string };

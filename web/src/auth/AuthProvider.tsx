@@ -4,7 +4,7 @@ import { api } from '../api/client';
 export type Role = 'admin' | 'uploader' | 'viewer';
 export type CurrentUser = { id: string; email: string; name: string; role: Role };
 
-type StatusResponse = { needsSetup: boolean; authenticated: boolean; user: CurrentUser | null };
+type StatusResponse = { needsSetup: boolean; user: CurrentUser | null };
 
 type AuthState = {
   loading: boolean;

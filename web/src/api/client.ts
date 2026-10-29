@@ -28,4 +28,9 @@ export async function api<T>(path: string, init: RequestInit = {}): Promise<T> {
   return data as T;
 }
 
+/** The server's message for an API error, else `fallback`. */
+export function errMsg(e: unknown, fallback = 'Something went wrong'): string {
+  return e instanceof ApiError ? e.message : fallback;
+}
+
 export const jsonBody = (body: unknown): RequestInit => ({ body: JSON.stringify(body) });

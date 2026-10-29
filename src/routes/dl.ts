@@ -1,11 +1,11 @@
 import { Hono, type Context } from 'hono';
-import { ApiError, badRequest, forbidden, notFound } from '../lib/http';
+import { ApiError, attachment, badRequest, notFound } from '../lib/http';
 import { pullScript } from '../lib/pullscript';
 import { R2S3 } from '../lib/r2s3';
 import { planZip, zipStream } from '../lib/zipstream';
 import { requireAuthAny, type AppEnv } from '../middleware';
+import { loadProject, type ProjectRow } from './projects';
 
-type ProjectRow = { id: string; slug: string; name: string };
 type ReleaseRow = { id: string; version: string; status: string; published_at: number | null; digest: string | null };
 type FileRow = {
   id: string;
@@ -33,15 +33,7 @@ dlRoutes.get('/:slug/pull.sh', requireAuthAny(), async (c) => {
 });
 
 async function resolveRelease(c: Context<AppEnv>, which: string): Promise<{ project: ProjectRow; release: ReleaseRow }> {
-  const auth = c.get('auth');
-  const project = await c.env.DB
-    .prepare('SELECT id, slug, name FROM projects WHERE slug = ?')
-    .bind(c.req.param('slug'))
-    .first<ProjectRow>();
-  if (!project) throw notFound('Project not found');
-  if (auth.kind === 'token' && auth.projectId && auth.projectId !== project.id) {
-    throw forbidden('This token is scoped to a different project');
-  }
+  const project = await loadProject(c);
   const release =
     which === 'latest'
       ? await c.env.DB
@@ -107,7 +99,7 @@ async function serveRelease(c: Context<AppEnv>, which: string): Promise<Response
 
   const headers = new Headers({
     'content-type': file.content_type || 'application/octet-stream',
-    'content-disposition': `attachment; filename="${filename.replaceAll('"', '').replaceAll('\\', '')}"`,
+    'content-disposition': attachment(filename),
     etag,
     'accept-ranges': 'bytes',
     'cache-control': 'private, max-age=0, must-revalidate',
@@ -130,7 +122,16 @@ function countFileDownload(c: Context<AppEnv>, releaseId: string, fileId: string
         c.env.DB.prepare('UPDATE releases SET download_count = download_count + 1 WHERE id = ?').bind(releaseId),
         c.env.DB.prepare('UPDATE release_files SET download_count = download_count + 1 WHERE id = ?').bind(fileId),
       ])
-      .then(() => {})
+      .catch(() => {}),
+  );
+}
+
+function countReleaseDownload(c: Context<AppEnv>, releaseId: string): void {
+  c.executionCtx.waitUntil(
+    c.env.DB
+      .prepare('UPDATE releases SET download_count = download_count + 1 WHERE id = ?')
+      .bind(releaseId)
+      .run()
       .catch(() => {}),
   );
 }
@@ -154,18 +155,11 @@ function serveZip(c: Context<AppEnv>, project: ProjectRow, release: ReleaseRow, 
       .pipeTo(writable)
       .catch((err) => console.error('zip stream failed', project.slug, release.version, err)),
   );
-  c.executionCtx.waitUntil(
-    c.env.DB
-      .prepare('UPDATE releases SET download_count = download_count + 1 WHERE id = ?')
-      .bind(release.id)
-      .run()
-      .then(() => {})
-      .catch(() => {}),
-  );
+  countReleaseDownload(c, release.id);
   return new Response(readable, {
     headers: {
       'content-type': 'application/zip',
-      'content-disposition': `attachment; filename="${project.slug}-v${release.version}.zip"`,
+      'content-disposition': attachment(`${project.slug}-v${release.version}.zip`),
       'cache-control': 'private, max-age=0, must-revalidate',
     },
   });
@@ -240,14 +234,7 @@ async function serveLinks(c: Context<AppEnv>): Promise<Response> {
     for (const line of signed) if (line) out.push(line);
   }
 
-  c.executionCtx.waitUntil(
-    c.env.DB
-      .prepare('UPDATE releases SET download_count = download_count + 1 WHERE id = ?')
-      .bind(release.id)
-      .run()
-      .then(() => {})
-      .catch(() => {}),
-  );
+  countReleaseDownload(c, release.id);
   return new Response(out.join('\n') + '\n', {
     headers: { 'content-type': 'text/plain; charset=utf-8', 'cache-control': 'no-store' },
   });

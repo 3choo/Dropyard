@@ -1,10 +1,10 @@
 import { useState, type FormEvent, type ReactNode } from 'react';
 import { Link, useNavigate, useParams, useSearchParams } from 'react-router';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { ApiError, api } from '../../api/client';
+import { api, errMsg } from '../../api/client';
 import { useAuth } from '../../auth/AuthProvider';
 import { Markdown } from '../../components/Markdown';
-import { Button, Chip, EmptyState, Input, Select, Spinner, Textarea, toast } from '../../components/ui';
+import { Button, Chip, EmptyState, Input, Loading, Select, Textarea, toast } from '../../components/ui';
 import { IconAlert, IconCheck, IconComment, IconIssue, IconMerge, IconPlus, IconPullRequest } from '../../components/icons';
 import { formatDate, timeAgo } from '../../lib/format';
 import { useProject } from '../project/ProjectPage';
@@ -58,14 +58,6 @@ type IssueDetail = {
     requiresApproval: boolean;
   };
 };
-
-function Loading() {
-  return (
-    <div className="flex items-center gap-2 py-10 text-[13px] text-ink-3">
-      <Spinner /> Loading…
-    </div>
-  );
-}
 
 function StateIcon({ kind, state, size = 15 }: { kind: Kind; state: IssueSummary['state']; size?: number }) {
   if (kind === 'pull') {
@@ -186,7 +178,7 @@ export function NewIssuePage() {
       void qc.invalidateQueries({ queryKey: ['issues', project.slug] });
       navigate(`/p/${project.slug}/issues/${res.number}`);
     },
-    onError: (err) => toast(err instanceof ApiError ? err.message : 'Could not create the issue', 'err'),
+    onError: (err) => toast(errMsg(err, 'Could not create the issue'), 'err'),
   });
   return (
     <form
@@ -263,7 +255,7 @@ export function IssuePage({ kind }: { kind: Kind }) {
     void qc.invalidateQueries({ queryKey: ['issue', slug, number] });
     void qc.invalidateQueries({ queryKey: ['issues', slug] });
   };
-  const fail = (err: unknown) => toast(err instanceof ApiError ? err.message : 'Something went wrong', 'err');
+  const fail = (err: unknown) => toast(errMsg(err, 'Something went wrong'), 'err');
 
   const addComment = useMutation({
     mutationFn: (input: { body: string; path?: string; line?: number; side?: string }) =>
@@ -300,7 +292,7 @@ export function IssuePage({ kind }: { kind: Kind }) {
   });
 
   if (detail.isError) {
-    return <EmptyState icon={<IconIssue />} title="Not found" body={detail.error instanceof ApiError ? detail.error.message : ''} />;
+    return <EmptyState icon={<IconIssue />} title="Not found" body={errMsg(detail.error, '')} />;
   }
   if (!detail.data) return <Loading />;
   const { issue, comments, events, reviews, pull } = detail.data;

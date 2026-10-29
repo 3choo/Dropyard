@@ -1,7 +1,7 @@
-import { Suspense, lazy, useEffect, useMemo, useState } from 'react';
+import { Suspense, lazy, useEffect, useState } from 'react';
 import { Link, Navigate, useNavigate, useParams } from 'react-router';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { ApiError, api, jsonBody } from '../../api/client';
+import { api, jsonBody, errMsg } from '../../api/client';
 import { useAuth } from '../../auth/AuthProvider';
 import {
   Button,
@@ -107,7 +107,7 @@ export function FilePage() {
       void qc.invalidateQueries({ queryKey: ['blob', slug, version, path] });
       void qc.invalidateQueries({ queryKey: ['release', slug, version] });
     },
-    onError: (err) => toast(err instanceof ApiError ? err.message : 'Save failed', 'err'),
+    onError: (err) => toast(errMsg(err, 'Save failed'), 'err'),
   });
 
   const forkSave = useMutation({
@@ -129,7 +129,7 @@ export function FilePage() {
       void qc.invalidateQueries({ queryKey: ['project', slug] });
       navigate(`/p/${slug}/r/${next}`);
     },
-    onError: (err) => toast(err instanceof ApiError ? err.message : 'Save failed', 'err'),
+    onError: (err) => toast(errMsg(err, 'Save failed'), 'err'),
   });
 
   // --- render ------------------------------------------------------------------

@@ -105,6 +105,20 @@ export function clearSessionCookie(): string {
   return `${SESSION_COOKIE}=; Path=/; Max-Age=0; HttpOnly; Secure; SameSite=Lax`;
 }
 
+/** The session token from a Cookie header, if any. */
+export function parseSessionCookie(header: string | null | undefined): string | undefined {
+  if (!header) return undefined;
+  for (const part of header.split(';')) {
+    const [k, ...v] = part.trim().split('=');
+    if (k === SESSION_COOKIE) return v.join('=');
+  }
+  return undefined;
+}
+
+export function clientIp(req: Request): string {
+  return req.headers.get('cf-connecting-ip') ?? 'unknown';
+}
+
 export function setCookie(c: Context, header: string): void {
   c.header('set-cookie', header, { append: true });
 }
@@ -147,6 +161,29 @@ export async function recordLoginFailure(db: D1Database, email: string, ip: stri
 export async function clearLoginAttempts(db: D1Database, email: string, ip: string): Promise<void> {
   const key = await sha256Hex(`${email}|${ip}`);
   await db.prepare('DELETE FROM login_attempts WHERE key = ?').bind(key).run();
+}
+
+/**
+ * Checks an email + password against the rate limiter and the users table,
+ * recording the failure or clearing past ones. `email` must be lower-cased.
+ */
+export async function checkPassword(
+  db: D1Database,
+  email: string,
+  password: string,
+  ip: string,
+): Promise<SessionUser | 'blocked' | null> {
+  if (await loginBlocked(db, email, ip)) return 'blocked';
+  const row = await db
+    .prepare('SELECT id, email, name, role, password_hash FROM users WHERE email = ?')
+    .bind(email)
+    .first<{ id: string; email: string; name: string; role: Role; password_hash: string }>();
+  if (!row || !(await verifyPassword(password, row.password_hash))) {
+    await recordLoginFailure(db, email, ip);
+    return null;
+  }
+  await clearLoginAttempts(db, email, ip);
+  return { id: row.id, email: row.email, name: row.name, role: row.role };
 }
 
 export const PAT_PREFIX = 'gctp_';

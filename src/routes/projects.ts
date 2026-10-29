@@ -18,7 +18,14 @@ type ProjectRow = {
   created_by: string;
   created_at: number;
   updated_at: number;
+  default_branch: string;
+  protect_default: number;
 };
+
+/** Pushes and merges into a protected default branch need a pull request (and an approval). */
+function isProtectedBranch(project: ProjectRow, branch: string | null): boolean {
+  return project.protect_default === 1 && branch === project.default_branch;
+}
 
 type ReleaseRow = {
   id: string;
@@ -34,18 +41,6 @@ type ReleaseRow = {
   created_at: number;
   published_at: number | null;
   commit_sha: string | null;
-};
-
-type FileRow = {
-  id: string;
-  release_id: string;
-  path: string;
-  r2_key: string;
-  size: number;
-  content_type: string;
-  digest: string | null;
-  download_count: number;
-  created_at: number;
 };
 
 const VERSION_RE = /^[0-9]+(\.[0-9]+){0,3}(-[a-z0-9.]+)?$/i;
@@ -84,11 +79,64 @@ async function getProjectBySlug(db: D1Database, slug: string): Promise<ProjectRo
   return db.prepare('SELECT * FROM projects WHERE slug = ?').bind(slug).first<ProjectRow>();
 }
 
+/** Loads the `:slug` project or 404s; a deploy token may only reach its own project. */
+async function loadProject(c: Context<AppEnv>): Promise<ProjectRow> {
+  const project = await getProjectBySlug(c.env.DB, c.req.param('slug') ?? '');
+  if (!project) throw notFound('Project not found');
+  const auth = c.get('auth');
+  if (auth.kind === 'token' && auth.projectId && auth.projectId !== project.id) {
+    throw forbidden('This token is scoped to a different project');
+  }
+  return project;
+}
+
 async function getRelease(db: D1Database, projectId: string, version: string): Promise<ReleaseRow | null> {
   return db
     .prepare('SELECT * FROM releases WHERE project_id = ? AND version = ?')
     .bind(projectId, version)
     .first<ReleaseRow>();
+}
+
+async function loadRelease(c: Context<AppEnv>, project: ProjectRow): Promise<ReleaseRow> {
+  const release = await getRelease(c.env.DB, project.id, c.req.param('version') ?? '');
+  if (!release) throw notFound('Release not found');
+  return release;
+}
+
+/** Normalizes a requested new version and rejects bad or taken ones. */
+async function parseNewVersion(db: D1Database, projectId: string, version: string | undefined): Promise<string> {
+  if (!version) throw badRequest('A version is required');
+  const normalized = normalizeVersion(version);
+  if (!VERSION_RE.test(normalized)) {
+    throw badRequest('Version must look like 1.2.3 or 1.2.3-beta (max four number groups)');
+  }
+  if (await getRelease(db, projectId, normalized)) {
+    throw conflict(`Version ${normalized} already exists in this project`);
+  }
+  return normalized;
+}
+
+async function commitFiles(store: GitStore, sha: string) {
+  return (await listFiles(store, (await readCommit(store, sha)).tree)).filter(
+    (f) => f.mode === MODE_FILE || f.mode === MODE_EXEC,
+  );
+}
+
+function touchProject(db: D1Database, projectId: string) {
+  return db.prepare('UPDATE projects SET updated_at = ? WHERE id = ?').bind(nowMs(), projectId);
+}
+
+/** Puts a web-edited file at (release, path), replacing any file already there. */
+function upsertTextFile(db: D1Database, releaseId: string, path: string, r2Key: string, size: number, digest: string, now: number) {
+  return db
+    .prepare(
+      `INSERT INTO release_files (id, release_id, path, r2_key, size, content_type, digest, part_digests, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, '[]', ?)
+       ON CONFLICT(release_id, path) DO UPDATE SET
+         r2_key = excluded.r2_key, size = excluded.size, content_type = excluded.content_type,
+         digest = excluded.digest, part_digests = excluded.part_digests, created_at = excluded.created_at`,
+    )
+    .bind(randomId(12), releaseId, path, r2Key, size, contentTypeForPath(path), digest, now);
 }
 
 async function releaseDigest(release: ReleaseRow, db: D1Database): Promise<string> {
@@ -106,9 +154,7 @@ async function releaseDigest(release: ReleaseRow, db: D1Database): Promise<strin
 /** True when a draft cut from a commit still holds exactly that commit's files. */
 async function matchesCommit(env: Env, projectId: string, release: ReleaseRow): Promise<boolean> {
   const store = new GitStore(env, projectId);
-  const files = (await listFiles(store, (await readCommit(store, release.commit_sha!)).tree)).filter(
-    (f) => f.mode === MODE_FILE || f.mode === MODE_EXEC,
-  );
+  const files = await commitFiles(store, release.commit_sha!);
   const rows = await env.DB
     .prepare('SELECT path, digest FROM release_files WHERE release_id = ?')
     .bind(release.id)
@@ -158,12 +204,7 @@ projectRoutes.post('/', requireRole('admin', 'uploader'), async (c) => {
 });
 
 projectRoutes.get('/:slug', requireAuthAny(), async (c) => {
-  const auth = c.get('auth');
-  const project = await getProjectBySlug(c.env.DB, c.req.param('slug') ?? '');
-  if (!project) throw notFound('Project not found');
-  if (auth.kind === 'token' && auth.projectId && auth.projectId !== project.id) {
-    throw forbidden('This token is scoped to a different project');
-  }
+  const project = await loadProject(c);
   const releases = await c.env.DB.prepare(
     `SELECT r.id, r.version, r.title, r.status, r.is_latest, r.download_count, r.created_at, r.published_at, r.commit_sha,
        (SELECT COUNT(*) FROM release_files f WHERE f.release_id = r.id) AS files_count,
@@ -176,8 +217,7 @@ projectRoutes.get('/:slug', requireAuthAny(), async (c) => {
 });
 
 projectRoutes.patch('/:slug', requireRole('admin', 'uploader'), async (c) => {
-  const project = await getProjectBySlug(c.env.DB, c.req.param('slug') ?? '');
-  if (!project) throw notFound('Project not found');
+  const project = await loadProject(c);
   const body = await c.req.json<Record<string, unknown>>().catch(() => null);
   const { name, description, defaultBranch, protectDefault } = (body ?? {}) as {
     name?: string;
@@ -213,8 +253,7 @@ projectRoutes.patch('/:slug', requireRole('admin', 'uploader'), async (c) => {
 });
 
 projectRoutes.delete('/:slug', requireRole('admin'), async (c) => {
-  const project = await getProjectBySlug(c.env.DB, c.req.param('slug') ?? '');
-  if (!project) throw notFound('Project not found');
+  const project = await loadProject(c);
   let cursor: string | undefined;
   do {
     const listing = await c.env.BUCKET.list({ prefix: `p/${project.id}/`, cursor });
@@ -229,17 +268,10 @@ projectRoutes.delete('/:slug', requireRole('admin'), async (c) => {
 });
 
 projectRoutes.post('/:slug/releases', requireRole('admin', 'uploader'), async (c) => {
-  const project = await getProjectBySlug(c.env.DB, c.req.param('slug') ?? '');
-  if (!project) throw notFound('Project not found');
+  const project = await loadProject(c);
   const body = await c.req.json<Record<string, unknown>>().catch(() => null);
   const { version, title, notes, ref } = (body ?? {}) as { version?: string; title?: string; notes?: string; ref?: string };
-  if (!version) throw badRequest('A version is required');
-  const normalized = normalizeVersion(version);
-  if (!VERSION_RE.test(normalized)) {
-    throw badRequest('Version must look like 1.2.3 or 1.2.3-beta (max four number groups)');
-  }
-  const existing = await getRelease(c.env.DB, project.id, normalized);
-  if (existing) throw conflict(`Version ${normalized} already exists in this project`);
+  const normalized = await parseNewVersion(c.env.DB, project.id, version);
 
   // A release cut from a branch, tag or commit snapshots that commit's files.
   let commitSha: string | null = null;
@@ -248,9 +280,7 @@ projectRoutes.post('/:slug/releases', requireRole('admin', 'uploader'), async (c
     const store = new GitStore(c.env, project.id);
     commitSha = await resolveCommit(store, ref);
     if (!commitSha) throw badRequest(`No branch, tag or commit named "${ref}"`);
-    const files = (await listFiles(store, (await readCommit(store, commitSha)).tree)).filter(
-      (f) => f.mode === MODE_FILE || f.mode === MODE_EXEC,
-    );
+    const files = await commitFiles(store, commitSha);
     const metas = await store.metas(files.map((f) => f.sha));
     snapshot = files.map((f) => {
       const meta = metas.get(f.sha);
@@ -277,7 +307,7 @@ projectRoutes.post('/:slug/releases', requireRole('admin', 'uploader'), async (c
       ),
     );
   }
-  await c.env.DB.prepare('UPDATE projects SET updated_at = ? WHERE id = ?').bind(nowMs(), project.id).run();
+  await touchProject(c.env.DB, project.id).run();
   await audit(c.env.DB, sessionUser(c).email, 'release.create', `project:${project.slug}/v${normalized}`, commitSha ? { commit: commitSha } : undefined);
   return c.json(
     { release: { id, version: normalized, title: title ?? '', notes: notes ?? '', status: 'draft', commitSha }, filesAdded: snapshot.length },
@@ -289,12 +319,7 @@ async function resolveLatestPublished(c: Context<AppEnv>): Promise<{
   project: ProjectRow;
   release: ReleaseRow;
 }> {
-  const auth = c.get('auth');
-  const project = await getProjectBySlug(c.env.DB, c.req.param('slug') ?? '');
-  if (!project) throw notFound('Project not found');
-  if (auth.kind === 'token' && auth.projectId && auth.projectId !== project.id) {
-    throw forbidden('This token is scoped to a different project');
-  }
+  const project = await loadProject(c);
   const release = await c.env.DB
     .prepare(
       "SELECT * FROM releases WHERE project_id = ? AND status = 'published' ORDER BY is_latest DESC, published_at DESC LIMIT 1",
@@ -337,32 +362,30 @@ projectRoutes.get('/:slug/releases/latest', requireAuthAny(), async (c) => {
 });
 
 projectRoutes.get('/:slug/releases/:version', requireAuthAny(), async (c) => {
-  const auth = c.get('auth');
-  const project = await getProjectBySlug(c.env.DB, c.req.param('slug') ?? '');
-  if (!project) throw notFound('Project not found');
-  if (auth.kind === 'token' && auth.projectId && auth.projectId !== project.id) {
-    throw forbidden('This token is scoped to a different project');
-  }
-  const release = await getRelease(c.env.DB, project.id, c.req.param('version'));
-  if (!release) throw notFound('Release not found');
-  if (release.status === 'draft' && auth.kind === 'token') throw notFound('Release not found');
-  const files = await c.env.DB
-    .prepare('SELECT id, path, size, content_type, digest, download_count, created_at FROM release_files WHERE release_id = ? ORDER BY path')
-    .bind(release.id)
-    .all();
-  const jobs = await c.env.DB
-    .prepare('SELECT * FROM extract_jobs WHERE release_id = ? ORDER BY created_at DESC')
-    .bind(release.id)
-    .all<ExtractJobRow>();
+  const { project, release } = await loadReleaseForRead(c);
+  const [files, jobs] = await Promise.all([
+    c.env.DB
+      .prepare('SELECT id, path, size, content_type, digest, download_count, created_at FROM release_files WHERE release_id = ? ORDER BY path')
+      .bind(release.id)
+      .all(),
+    c.env.DB
+      .prepare('SELECT * FROM extract_jobs WHERE release_id = ? ORDER BY created_at DESC')
+      .bind(release.id)
+      .all<ExtractJobRow>(),
+  ]);
   const logJobs = jobs.results.slice(0, 3);
+  const logs = await Promise.all(
+    logJobs.map((job) =>
+      c.env.DB
+        .prepare('SELECT seq, line, at FROM extract_log WHERE job_id = ? ORDER BY seq DESC LIMIT 200')
+        .bind(job.id)
+        .all<{ seq: number; line: string; at: number }>(),
+    ),
+  );
   const extractLogs: Record<string, { seq: number; line: string; at: number }[]> = {};
-  for (const job of logJobs) {
-    const lines = await c.env.DB
-      .prepare('SELECT seq, line, at FROM extract_log WHERE job_id = ? ORDER BY seq DESC LIMIT 200')
-      .bind(job.id)
-      .all<{ seq: number; line: string; at: number }>();
-    if (lines.results.length > 0) extractLogs[job.id] = lines.results.reverse();
-  }
+  logs.forEach(({ results }, i) => {
+    if (results.length > 0) extractLogs[logJobs[i]!.id] = results.reverse();
+  });
   return c.json({
     project,
     release,
@@ -373,15 +396,9 @@ projectRoutes.get('/:slug/releases/:version', requireAuthAny(), async (c) => {
 });
 
 async function loadReleaseForRead(c: Context<AppEnv>): Promise<{ project: ProjectRow; release: ReleaseRow }> {
-  const auth = c.get('auth');
-  const project = await getProjectBySlug(c.env.DB, c.req.param('slug') ?? '');
-  if (!project) throw notFound('Project not found');
-  if (auth.kind === 'token' && auth.projectId && auth.projectId !== project.id) {
-    throw forbidden('This token is scoped to a different project');
-  }
-  const release = await getRelease(c.env.DB, project.id, c.req.param('version') ?? '');
-  if (!release) throw notFound('Release not found');
-  if (release.status === 'draft' && auth.kind === 'token') throw notFound('Release not found');
+  const project = await loadProject(c);
+  const release = await loadRelease(c, project);
+  if (release.status === 'draft' && c.get('auth').kind === 'token') throw notFound('Release not found');
   return { project, release };
 }
 
@@ -416,10 +433,8 @@ projectRoutes.get('/:slug/releases/:version/blob', requireAuthAny(), async (c) =
 });
 
 projectRoutes.post('/:slug/releases/:version/fork', requireRole('admin', 'uploader'), async (c) => {
-  const project = await getProjectBySlug(c.env.DB, c.req.param('slug') ?? '');
-  if (!project) throw notFound('Project not found');
-  const release = await getRelease(c.env.DB, project.id, c.req.param('version'));
-  if (!release) throw notFound('Release not found');
+  const project = await loadProject(c);
+  const release = await loadRelease(c, project);
   const body = await c.req.json<Record<string, unknown>>().catch(() => null);
   const { version, title, notes, path, content } = (body ?? {}) as {
     version?: string;
@@ -428,14 +443,7 @@ projectRoutes.post('/:slug/releases/:version/fork', requireRole('admin', 'upload
     path?: string;
     content?: string;
   };
-  if (!version) throw badRequest('A version is required');
-  const normalized = normalizeVersion(version);
-  if (!VERSION_RE.test(normalized)) {
-    throw badRequest('Version must look like 1.2.3 or 1.2.3-beta (max four number groups)');
-  }
-  if (await getRelease(c.env.DB, project.id, normalized)) {
-    throw conflict(`Version ${normalized} already exists in this project`);
-  }
+  const normalized = await parseNewVersion(c.env.DB, project.id, version);
   let editPath: string | null = null;
   let editBytes: Uint8Array | null = null;
   if (path !== undefined || content !== undefined) {
@@ -464,18 +472,9 @@ projectRoutes.post('/:slug/releases/:version/fork', requireRole('admin', 'upload
     const r2Key = await writeKeyFor(c.env.DB, project.id, id, editPath);
     await c.env.BUCKET.put(r2Key, editBytes, { httpMetadata: { contentType: contentTypeForPath(editPath) } });
     const digest = await sha256Hex(editBytes);
-    await c.env.DB
-      .prepare(
-        `INSERT INTO release_files (id, release_id, path, r2_key, size, content_type, digest, part_digests, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, '[]', ?)
-         ON CONFLICT(release_id, path) DO UPDATE SET
-           r2_key = excluded.r2_key, size = excluded.size, content_type = excluded.content_type,
-           digest = excluded.digest, part_digests = excluded.part_digests, created_at = excluded.created_at`,
-      )
-      .bind(randomId(12), id, editPath, r2Key, editBytes.byteLength, contentTypeForPath(editPath), digest, now)
-      .run();
+    await upsertTextFile(c.env.DB, id, editPath, r2Key, editBytes.byteLength, digest, now).run();
   }
-  await c.env.DB.prepare('UPDATE projects SET updated_at = ? WHERE id = ?').bind(nowMs(), project.id).run();
+  await touchProject(c.env.DB, project.id).run();
   await audit(c.env.DB, sessionUser(c).email, 'release.fork', `project:${project.slug}/v${normalized}`, {
     from: release.version,
     edited: editPath,
@@ -485,10 +484,8 @@ projectRoutes.post('/:slug/releases/:version/fork', requireRole('admin', 'upload
 });
 
 projectRoutes.put('/:slug/releases/:version/files/content', requireRole('admin', 'uploader'), async (c) => {
-  const project = await getProjectBySlug(c.env.DB, c.req.param('slug') ?? '');
-  if (!project) throw notFound('Project not found');
-  const release = await getRelease(c.env.DB, project.id, c.req.param('version'));
-  if (!release) throw notFound('Release not found');
+  const project = await loadProject(c);
+  const release = await loadRelease(c, project);
   if (release.status !== 'draft') {
     throw conflict('Published releases are immutable — save this edit into a new draft version');
   }
@@ -507,21 +504,9 @@ projectRoutes.put('/:slug/releases/:version/files/content', requireRole('admin',
   await c.env.BUCKET.put(r2Key, bytes, { httpMetadata: { contentType: contentTypeForPath(path) } });
   const digest = await sha256Hex(bytes);
   const now = nowMs();
-  if (existing) {
-    await c.env.DB
-      .prepare('UPDATE release_files SET r2_key = ?, size = ?, content_type = ?, digest = ?, part_digests = ?, created_at = ? WHERE id = ?')
-      .bind(r2Key, bytes.byteLength, contentTypeForPath(path), digest, '[]', now, existing.id)
-      .run();
-    c.executionCtx.waitUntil(deleteUnreferencedObjects(c.env.DB, c.env.BUCKET, [existing.r2_key]));
-  } else {
-    await c.env.DB
-      .prepare(
-        "INSERT INTO release_files (id, release_id, path, r2_key, size, content_type, digest, part_digests, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, '[]', ?)",
-      )
-      .bind(randomId(12), release.id, path, r2Key, bytes.byteLength, contentTypeForPath(path), digest, now)
-      .run();
-  }
-  await c.env.DB.prepare('UPDATE projects SET updated_at = ? WHERE id = ?').bind(nowMs(), project.id).run();
+  await upsertTextFile(c.env.DB, release.id, path, r2Key, bytes.byteLength, digest, now).run();
+  if (existing) c.executionCtx.waitUntil(deleteUnreferencedObjects(c.env.DB, c.env.BUCKET, [existing.r2_key]));
+  await touchProject(c.env.DB, project.id).run();
   await audit(c.env.DB, sessionUser(c).email, 'file.edit', `project:${project.slug}/v${release.version}/${path}`, {
     size: bytes.byteLength,
     digest,
@@ -530,10 +515,8 @@ projectRoutes.put('/:slug/releases/:version/files/content', requireRole('admin',
 });
 
 projectRoutes.patch('/:slug/releases/:version', requireRole('admin', 'uploader'), async (c) => {
-  const project = await getProjectBySlug(c.env.DB, c.req.param('slug') ?? '');
-  if (!project) throw notFound('Project not found');
-  const release = await getRelease(c.env.DB, project.id, c.req.param('version'));
-  if (!release) throw notFound('Release not found');
+  const project = await loadProject(c);
+  const release = await loadRelease(c, project);
   const user = sessionUser(c);
   if (release.status === 'published' && user.role !== 'admin') {
     throw forbidden('Only admins can edit a published release');
@@ -549,10 +532,8 @@ projectRoutes.patch('/:slug/releases/:version', requireRole('admin', 'uploader')
 });
 
 projectRoutes.post('/:slug/releases/:version/publish', requireRole('admin', 'uploader'), async (c) => {
-  const project = await getProjectBySlug(c.env.DB, c.req.param('slug') ?? '');
-  if (!project) throw notFound('Project not found');
-  const release = await getRelease(c.env.DB, project.id, c.req.param('version'));
-  if (!release) throw notFound('Release not found');
+  const project = await loadProject(c);
+  const release = await loadRelease(c, project);
   if (release.status === 'published') throw conflict('This release is already published');
   const files = await c.env.DB
     .prepare('SELECT COUNT(*) AS n FROM release_files WHERE release_id = ?')
@@ -573,7 +554,7 @@ projectRoutes.post('/:slug/releases/:version/publish', requireRole('admin', 'upl
     c.env.DB
       .prepare("UPDATE releases SET status = 'published', is_latest = 1, published_at = ?, digest = ? WHERE id = ?")
       .bind(nowMs(), digest, release.id),
-    c.env.DB.prepare('UPDATE projects SET updated_at = ? WHERE id = ?').bind(nowMs(), project.id),
+    touchProject(c.env.DB, project.id),
   ]);
   const user = sessionUser(c);
   await audit(c.env.DB, user.email, 'release.publish', `project:${project.slug}/v${release.version}`, { digest });
@@ -607,10 +588,8 @@ projectRoutes.post('/:slug/releases/:version/publish', requireRole('admin', 'upl
 });
 
 projectRoutes.post('/:slug/releases/:version/extractions/:jobId/retry', requireRole('admin', 'uploader'), async (c) => {
-  const project = await getProjectBySlug(c.env.DB, c.req.param('slug') ?? '');
-  if (!project) throw notFound('Project not found');
-  const release = await getRelease(c.env.DB, project.id, c.req.param('version'));
-  if (!release) throw notFound('Release not found');
+  const project = await loadProject(c);
+  const release = await loadRelease(c, project);
   if (release.status !== 'draft') throw conflict('Published releases are immutable');
   const jobId = c.req.param('jobId') ?? '';
   const job = await c.env.DB
@@ -630,10 +609,8 @@ projectRoutes.post('/:slug/releases/:version/extractions/:jobId/retry', requireR
 });
 
 projectRoutes.delete('/:slug/releases/:version', requireRole('admin', 'uploader'), async (c) => {
-  const project = await getProjectBySlug(c.env.DB, c.req.param('slug') ?? '');
-  if (!project) throw notFound('Project not found');
-  const release = await getRelease(c.env.DB, project.id, c.req.param('version'));
-  if (!release) throw notFound('Release not found');
+  const project = await loadProject(c);
+  const release = await loadRelease(c, project);
   const user = sessionUser(c);
   if (release.status === 'published' && user.role !== 'admin') {
     throw forbidden('Only admins can delete a published release');
@@ -655,4 +632,4 @@ projectRoutes.delete('/:slug/releases/:version', requireRole('admin', 'uploader'
   return c.json({ ok: true });
 });
 
-export { getProjectBySlug, getRelease, type ProjectRow, type ReleaseRow };
+export { getProjectBySlug, getRelease, isProtectedBranch, loadProject, type ProjectRow, type ReleaseRow };

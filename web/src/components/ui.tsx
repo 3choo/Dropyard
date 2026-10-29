@@ -92,6 +92,14 @@ export function Spinner({ className = '' }: { className?: string }) {
   );
 }
 
+export function Loading() {
+  return (
+    <div className="flex items-center gap-2 py-10 text-[13px] text-ink-3">
+      <Spinner /> Loading…
+    </div>
+  );
+}
+
 // --- Chips ------------------------------------------------------------------------
 
 export function Chip({

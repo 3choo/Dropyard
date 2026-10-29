@@ -33,46 +33,6 @@ const UPLOAD_CONCURRENCY = 12;
 // Per-callback chunk into the Worker; each chunk becomes one D1 batch.
 const CALLBACK_FILES = 200;
 
-const MIME = {
-  html: 'text/html; charset=utf-8',
-  css: 'text/css; charset=utf-8',
-  js: 'text/javascript; charset=utf-8',
-  json: 'application/json',
-  xml: 'application/xml',
-  txt: 'text/plain; charset=utf-8',
-  md: 'text/markdown; charset=utf-8',
-  lua: 'text/plain; charset=utf-8',
-  cfg: 'text/plain; charset=utf-8',
-  ini: 'text/plain; charset=utf-8',
-  png: 'image/png',
-  jpg: 'image/jpeg',
-  jpeg: 'image/jpeg',
-  gif: 'image/gif',
-  webp: 'image/webp',
-  svg: 'image/svg+xml',
-  ico: 'image/x-icon',
-  dds: 'image/vnd-ms.dds',
-  mp3: 'audio/mpeg',
-  ogg: 'audio/ogg',
-  wav: 'audio/wav',
-  mp4: 'video/mp4',
-  webm: 'video/webm',
-  pdf: 'application/pdf',
-  ytd: 'application/x-gtav-ytd',
-  ydr: 'application/x-gtav-ydr',
-  ydd: 'application/x-gtav-ydd',
-  yft: 'application/x-gtav-yft',
-  ymap: 'application/x-gtav-ymap',
-  ymt: 'application/x-gtav-ymt',
-  awc: 'application/x-gtav-awc',
-  meta: 'application/x-gtav-meta',
-};
-
-function contentTypeFor(path) {
-  const match = /\.([a-z0-9]+)$/i.exec(path);
-  return (match && MIME[match[1].toLowerCase()]) || 'application/octet-stream';
-}
-
 function fmtBytes(n) {
   const units = ['B', 'KiB', 'MiB', 'GiB', 'TiB'];
   let v = n;
@@ -254,7 +214,7 @@ function makeBatchUploader(client, r2, payload, dir, prefix) {
         // Free the disk as soon as the file is safely in R2.
         await fs.rm(file, { force: true });
         await flushChain;
-        pendingFiles.push({ path: clean, size: st.size, contentType: contentTypeFor(clean) });
+        pendingFiles.push({ path: clean, size: st.size });
         flushChain = flushChain.then(() => flushFiles());
       });
       await flushChain;

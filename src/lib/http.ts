@@ -19,9 +19,7 @@ export const notFound = (message = 'Not found') => new ApiError(404, 'not_found'
 export const conflict = (message: string) => new ApiError(409, 'conflict', message);
 export const tooLarge = (message: string) => new ApiError(413, 'too_large', message);
 
-export function json(data: unknown, status = 200, headers: Record<string, string> = {}): Response {
-  return new Response(JSON.stringify(data), {
-    status,
-    headers: { 'content-type': 'application/json; charset=utf-8', ...headers },
-  });
+/** A content-disposition value that downloads as `filename`. */
+export function attachment(filename: string): string {
+  return `attachment; filename="${filename.replaceAll('"', '').replaceAll('\\', '')}"`;
 }

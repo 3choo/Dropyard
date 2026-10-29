@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } fro
 import { Link, useNavigate, useParams, useSearchParams } from 'react-router';
 import { useMutation, useQuery } from '@tanstack/react-query';
 import { AnimatePresence, motion } from 'motion/react';
-import { ApiError, api } from '../../api/client';
+import { api, errMsg } from '../../api/client';
 import { useAuth } from '../../auth/AuthProvider';
 import { Button, Input, Modal, Select, Textarea, toast } from '../../components/ui';
 import type { RepoSummary } from '../repo/types';
@@ -90,7 +90,7 @@ export function NewReleasePage() {
       }
       setReleaseId(res.release.id);
     },
-    onError: (err) => toast(err instanceof ApiError ? err.message : 'Could not create the draft', 'err'),
+    onError: (err) => toast(errMsg(err, 'Could not create the draft'), 'err'),
   });
 
   if (project.isLoading) return <div className="px-8 py-10 text-[13px] text-ink-3">Loading…</div>;
@@ -283,7 +283,7 @@ function UploadPhase({
       toast(`v${version} published — the server can pull it now`);
       navigate(`/p/${slug}/r/${version}`);
     },
-    onError: (err) => toast(err instanceof ApiError ? err.message : 'Publish failed', 'err'),
+    onError: (err) => toast(errMsg(err, 'Publish failed'), 'err'),
   });
 
   const discard = useMutation({
@@ -292,7 +292,7 @@ function UploadPhase({
       toast('Draft discarded');
       navigate(`/p/${slug}/releases`);
     },
-    onError: (err) => toast(err instanceof ApiError ? err.message : 'Could not discard', 'err'),
+    onError: (err) => toast(errMsg(err, 'Could not discard'), 'err'),
   });
 
   const busy = engine.busy;

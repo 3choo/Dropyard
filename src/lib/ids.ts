@@ -20,11 +20,6 @@ export async function sha256Hex(input: string | Uint8Array): Promise<string> {
   return [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, '0')).join('');
 }
 
-export async function sha256B64(input: Uint8Array): Promise<string> {
-  const digest = await crypto.subtle.digest('SHA-256', input as unknown as BufferSource);
-  return btoa(String.fromCharCode(...new Uint8Array(digest)));
-}
-
 export function slugify(name: string): string {
   const slug = name
     .toLowerCase()

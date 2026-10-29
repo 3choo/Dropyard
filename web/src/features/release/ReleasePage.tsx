@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { ApiError, api } from '../../api/client';
+import { api, errMsg } from '../../api/client';
 import { useAuth } from '../../auth/AuthProvider';
 import { Button, Chip, CopyButton, EmptyState, Modal, toast } from '../../components/ui';
 import { FileTree } from '../../components/FileTree';
@@ -90,7 +90,7 @@ export function ReleasePage() {
       toast('Extraction restarted');
       void query.refetch();
     },
-    onError: (err) => toast(err instanceof ApiError ? err.message : 'Retry failed', 'err'),
+    onError: (err) => toast(errMsg(err, 'Retry failed'), 'err'),
   });
 
   const publish = useMutation({
@@ -100,7 +100,7 @@ export function ReleasePage() {
       void qc.invalidateQueries({ queryKey: ['project', slug] });
       void query.refetch();
     },
-    onError: (err) => toast(err instanceof ApiError ? err.message : 'Publish failed', 'err'),
+    onError: (err) => toast(errMsg(err, 'Publish failed'), 'err'),
   });
 
   const remove = useMutation({
@@ -110,7 +110,7 @@ export function ReleasePage() {
       void qc.invalidateQueries({ queryKey: ['project', slug] });
       navigate(`/p/${slug}/releases`);
     },
-    onError: (err) => toast(err instanceof ApiError ? err.message : 'Delete failed', 'err'),
+    onError: (err) => toast(errMsg(err, 'Delete failed'), 'err'),
   });
 
   if (query.isLoading) return <div className="px-8 py-10 text-[13px] text-ink-3">Loading…</div>;

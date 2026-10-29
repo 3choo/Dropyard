@@ -266,12 +266,6 @@ export class UploadEngine {
     this.update(id, { status: 'paused', bps: 0 });
   }
 
-  pauseAll(): void {
-    for (const item of this.items.values()) {
-      if (['queued', 'starting', 'active'].includes(item.status)) this.pause(item.id);
-    }
-  }
-
   resume(id: string): void {
     const item = this.items.get(id);
     if (!item || !['paused', 'error'].includes(item.status)) return;
@@ -302,10 +296,6 @@ export class UploadEngine {
     return [...this.items.values()].some((i) =>
       ['queued', 'starting', 'active', 'completing', 'unpacking'].includes(i.status),
     );
-  }
-
-  get completedCount(): number {
-    return [...this.items.values()].filter((i) => i.status === 'done').length;
   }
 
   private async pump(): Promise<void> {

@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { useMutation, useQuery } from '@tanstack/react-query';
-import { ApiError, api } from '../../api/client';
+import { api, errMsg } from '../../api/client';
 import { Button, CopyButton, EmptyState, Input, toast } from '../../components/ui';
 import { IconKey, IconTrash } from '../../components/icons';
 import { timeAgo } from '../../lib/format';
@@ -19,12 +19,12 @@ export function TokensPage() {
       setName('');
       void list.refetch();
     },
-    onError: (err) => toast(err instanceof ApiError ? err.message : 'Could not create the token', 'err'),
+    onError: (err) => toast(errMsg(err, 'Could not create the token'), 'err'),
   });
   const revoke = useMutation({
     mutationFn: (id: string) => api(`/api/me/tokens/${id}`, { method: 'DELETE' }),
     onSuccess: () => void list.refetch(),
-    onError: (err) => toast(err instanceof ApiError ? err.message : 'Could not revoke the token', 'err'),
+    onError: (err) => toast(errMsg(err, 'Could not revoke the token'), 'err'),
   });
 
   return (

@@ -15,7 +15,17 @@ const PREFETCH_MAX = 2 * MB;
 const COMPRESS_MAX = 4 * MB;
 const AHEAD_ENTRIES = 48;
 const AHEAD_BYTES = 32 * MB;
-const STORED_BLOCK = 65535;
+export const STORED_BLOCK = 65535;
+
+/** The 5-byte header of one stored deflate block of `len` bytes. */
+export function storedBlockHeader(len: number, final: boolean): Uint8Array {
+  return Uint8Array.from([final ? 1 : 0, len & 0xff, len >> 8, ~len & 0xff, (~len >> 8) & 0xff]);
+}
+
+/** The zlib trailer: the adler32 checksum, big-endian. */
+export function adlerTrailer(a: number): Uint8Array {
+  return Uint8Array.from([(a >>> 24) & 0xff, (a >>> 16) & 0xff, (a >>> 8) & 0xff, a & 0xff]);
+}
 
 export function entryHeader(type: ObjType, size: number): Uint8Array {
   const bytes: number[] = [];
@@ -62,20 +72,14 @@ class StoredZlib {
       const piece = chunk.subarray(i, i + STORED_BLOCK);
       this.remaining -= piece.length;
       const out = new Uint8Array(piece.length + 5);
-      const len = piece.length;
-      out[0] = this.remaining === 0 ? 1 : 0;
-      out[1] = len & 0xff;
-      out[2] = len >> 8;
-      out[3] = ~len & 0xff;
-      out[4] = (~len >> 8) & 0xff;
+      out.set(storedBlockHeader(piece.length, this.remaining === 0));
       out.set(piece, 5);
       yield out;
     }
   }
   finish(): Uint8Array {
     if (this.remaining !== 0) throw new Error('stored object length mismatch');
-    const a = this.adler;
-    return Uint8Array.from([(a >>> 24) & 0xff, (a >>> 16) & 0xff, (a >>> 8) & 0xff, a & 0xff]);
+    return adlerTrailer(this.adler);
   }
 }
 

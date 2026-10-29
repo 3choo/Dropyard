@@ -2,7 +2,7 @@ import { useState, type FormEvent } from 'react';
 import { Link, NavLink, Outlet, useNavigate, useOutletContext, useParams } from 'react-router';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { motion } from 'motion/react';
-import { ApiError, api } from '../../api/client';
+import { api, errMsg } from '../../api/client';
 import { useAuth } from '../../auth/AuthProvider';
 import { Button, Chip, EmptyState, Input, Modal, Select, Textarea, toast } from '../../components/ui';
 import {
@@ -308,7 +308,7 @@ function SettingsModal({
       onSaved();
       onClose();
     },
-    onError: (err) => toast(err instanceof ApiError ? err.message : 'Update failed', 'err'),
+    onError: (err) => toast(errMsg(err, 'Update failed'), 'err'),
   });
 
   return (
@@ -382,7 +382,7 @@ function DeleteModal({ open, onClose, project }: { open: boolean; onClose: () =>
       void qc.invalidateQueries({ queryKey: ['projects'] });
       navigate('/');
     },
-    onError: (err) => toast(err instanceof ApiError ? err.message : 'Delete failed', 'err'),
+    onError: (err) => toast(errMsg(err, 'Delete failed'), 'err'),
   });
 
   return (

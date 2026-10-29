@@ -1,9 +1,9 @@
 import { Suspense, lazy, useState, type FormEvent } from 'react';
 import { Link, useNavigate, useParams, useSearchParams } from 'react-router';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { ApiError, api } from '../../api/client';
+import { api, errMsg } from '../../api/client';
 import { Markdown } from '../../components/Markdown';
-import { Button, CopyButton, EmptyState, Input, Modal, Spinner, Textarea, toast } from '../../components/ui';
+import { Button, CopyButton, EmptyState, Input, Loading, Modal, Textarea, toast } from '../../components/ui';
 import { IconDownload, IconEdit, IconFile, IconTrash } from '../../components/icons';
 import { formatBytes } from '../../lib/format';
 import { useProject } from '../project/ProjectPage';
@@ -26,14 +26,6 @@ type BlobResponse = {
 };
 
 const IMAGE_RE = /\.(png|jpe?g|gif|webp|svg|ico)$/i;
-
-function Loading() {
-  return (
-    <div className="flex items-center gap-2 py-10 text-[13px] text-ink-3">
-      <Spinner /> Loading…
-    </div>
-  );
-}
 
 export function BlobPage() {
   const { project, repo, canUpload } = useProject();
@@ -67,7 +59,7 @@ export function BlobPage() {
         <EmptyState
           icon={<IconFile />}
           title="File not found"
-          body={blob.error instanceof ApiError ? blob.error.message : 'It may not exist at this ref.'}
+          body={errMsg(blob.error, 'It may not exist at this ref.')}
           action={<Button onClick={() => navigate(treeUrl(slug, refParam))}>Back to code</Button>}
         />
       ) : !blob.data ? (
@@ -154,7 +146,7 @@ function DeleteFileModal({ open, onClose, branch, path }: { open: boolean; onClo
       refetchRepo();
       navigate(treeUrl(project.slug, branch, path.split('/').slice(0, -1).join('/')));
     },
-    onError: (err) => toast(err instanceof ApiError ? err.message : 'Delete failed', 'err'),
+    onError: (err) => toast(errMsg(err, 'Delete failed'), 'err'),
   });
   return (
     <Modal open={open} onClose={onClose} title={`Delete ${path.split('/').pop()}?`}>
@@ -225,7 +217,7 @@ export function EditPage({ creating = false }: { creating?: boolean }) {
       if (res.branch !== branch) navigate(compareUrl(slug, branch, res.branch));
       else navigate(blobUrl(slug, refParam, res.path));
     },
-    onError: (err) => toast(err instanceof ApiError ? err.message : 'Commit failed', 'err'),
+    onError: (err) => toast(errMsg(err, 'Commit failed'), 'err'),
   });
 
   if (!canUpload) return <p className="text-[13px] text-ink-2">You need the uploader role to commit from the browser.</p>;

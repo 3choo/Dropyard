@@ -1,7 +1,7 @@
 import { useEffect, useState, type FormEvent } from 'react';
 import { useNavigate, useParams } from 'react-router';
-import { ApiError, api } from '../../api/client';
-import { useAuth, type CurrentUser } from '../../auth/AuthProvider';
+import { api, errMsg } from '../../api/client';
+import { useAuth } from '../../auth/AuthProvider';
 import { Button, Input } from '../../components/ui';
 
 function AuthLayout({ title, sub, children }: { title: string; sub: string; children: React.ReactNode }) {
@@ -50,7 +50,7 @@ export function LoginPage() {
       await refresh();
       navigate('/', { replace: true });
     } catch (err) {
-      setError(err instanceof ApiError ? err.message : 'Sign in failed');
+      setError(errMsg(err, 'Sign in failed'));
     } finally {
       setBusy(false);
     }
@@ -102,7 +102,7 @@ export function SetupPage() {
       await refresh();
       navigate('/', { replace: true });
     } catch (err) {
-      setError(err instanceof ApiError ? err.message : 'Setup failed');
+      setError(errMsg(err, 'Setup failed'));
     } finally {
       setBusy(false);
     }
@@ -167,7 +167,7 @@ export function InvitePage() {
       await refresh();
       navigate('/', { replace: true });
     } catch (err) {
-      setError(err instanceof ApiError ? err.message : 'Could not accept the invite');
+      setError(errMsg(err, 'Could not accept the invite'));
     } finally {
       setBusy(false);
     }

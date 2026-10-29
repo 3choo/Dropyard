@@ -1,7 +1,7 @@
 import { useRef, useState } from 'react';
 import { Link } from 'react-router';
 import { useQuery } from '@tanstack/react-query';
-import { ApiError, api } from '../../api/client';
+import { api, errMsg } from '../../api/client';
 import { Button, CopyButton, toast } from '../../components/ui';
 import { IconArrowLeft, IconDownload } from '../../components/icons';
 import { formatBytes, timeAgo } from '../../lib/format';
@@ -67,7 +67,7 @@ export function StarterPage() {
         if (res.starter.status !== 'building') break;
       }
     } catch (err) {
-      toast(err instanceof ApiError ? err.message : 'A step failed — press Resume to continue', 'err');
+      toast(errMsg(err, 'A step failed — press Resume to continue'), 'err');
     } finally {
       running.current = false;
       setBusy(false);
@@ -81,7 +81,7 @@ export function StarterPage() {
       void q.refetch();
       void drive();
     } catch (err) {
-      toast(err instanceof ApiError ? err.message : 'Could not start', 'err');
+      toast(errMsg(err, 'Could not start'), 'err');
     }
   };
 

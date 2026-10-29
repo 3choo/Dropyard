@@ -2,7 +2,7 @@ import type { Context, MiddlewareHandler } from 'hono';
 import {
   type Role,
   type SessionUser,
-  SESSION_COOKIE,
+  parseSessionCookie,
   resolveSession,
   resolveUserToken,
 } from './lib/auth';
@@ -47,21 +47,12 @@ async function resolveAny(env: Env, req: Request): Promise<AuthContext | null> {
     const ctx = await resolveToken(env, queryToken);
     if (ctx) return ctx;
   }
-  const cookie = parseCookie(req.headers.get('cookie'));
+  const cookie = parseSessionCookie(req.headers.get('cookie'));
   if (cookie) {
     const user = await resolveSession(env.DB, cookie);
     if (user) return { kind: 'session', user };
   }
   return null;
-}
-
-function parseCookie(header: string | null): string | undefined {
-  if (!header) return undefined;
-  for (const part of header.split(';')) {
-    const [k, ...v] = part.trim().split('=');
-    if (k === SESSION_COOKIE) return v.join('=');
-  }
-  return undefined;
 }
 
 export function requireSession(): MiddlewareHandler<AppEnv> {
