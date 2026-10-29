@@ -11,7 +11,7 @@ import schema5 from '../migrations/0005_collab.sql?raw';
 // with ';': strip every comment and collapse each statement to one line.
 for (const schema of [schema1, schema2, schema3, schema4, schema5]) {
   const sql = schema
-    .split('\n')
+    .split(/\r?\n/)
     .map((line) => line.replace(/--.*$/, ''))
     .join(' ')
     .replace(/\s+/g, ' ')
