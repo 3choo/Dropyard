@@ -19,49 +19,64 @@ pulls them over stable, token-authenticated URLs.
   commit history, diffs, branches, pull requests with reviews, issues and
   comments. Releases are tagged snapshots of commits.
 
-## One-time setup (~5 minutes)
+## Quick start
 
-Requirements: a Cloudflare account, Node 20+, this repo.
+Requirements: a Cloudflare account (Workers, D1 and, for the default setup, R2), Node 20+, and Docker only if you want `.rar` unpacking.
 
 ```bash
+git clone https://github.com/3choo/gitctx.git && cd gitctx
 npm install
 npx wrangler login
-npx wrangler r2 bucket create gitctx
-npx wrangler d1 create gitctx        # copy the database_id into wrangler.jsonc
-npx wrangler d1 migrations apply gitctx --remote
-```
-
-Then in the Cloudflare dashboard: **R2 → Manage API tokens → Create API token**
-(Object Read & Write, scoped to the `gitctx` bucket). Store the keys as Worker
-secrets and put your account id in `wrangler.jsonc`:
-
-```bash
-npx wrangler secret put R2_ACCESS_KEY_ID
-npx wrangler secret put R2_SECRET_ACCESS_KEY
-```
-
-```jsonc
-// wrangler.jsonc -> vars
-"R2_S3_ACCOUNT_ID": "your-cloudflare-account-id"
-```
-
-Allow the browser to talk to R2 directly — edit `r2-cors.json` to list your
-real origins (your workers.dev URL after first deploy, plus any custom domain),
-then apply it:
-
-```bash
-npx wrangler r2 bucket cors put gitctx --file r2-cors.json
-```
-
-Deploy:
-
-```bash
-npm run deploy        # builds the SPA and deploys the Worker (+ RAR container; Docker must be running)
+npm run setup      # creates the bucket + D1 database, writes wrangler.local.jsonc, stores secrets, applies CORS + migrations
+npm run deploy     # builds the SPA and deploys the Worker (+ RAR container; Docker must be running)
 ```
 
 Open the printed URL → you land on **setup** to create the first admin
 account. Invite teammates under **Admin → Invites**, create a deploy token
 under **Admin → Deploy tokens**, done.
+
+`npm run setup` writes your personal IDs and settings to `wrangler.local.jsonc`
+(gitignored). `npm run deploy` and `npm run migrate:remote` use that file when
+it exists and fall back to the committed `wrangler.jsonc` template.
+
+## Storage backends
+
+gitctx stores release files and Git blobs in object storage. Two modes:
+
+| Mode | When | Config |
+| ---- | ---- | ------ |
+| **Cloudflare R2** (default) | You deploy on Cloudflare and want zero egress fees | R2 bucket bound as `BUCKET`, plus R2 S3 keys for large uploads |
+| **Any S3-compatible service** | AWS S3, MinIO, Backblaze B2, Wasabi, DigitalOcean Spaces, ... | `STORAGE_BACKEND=s3` and the `S3_*` settings below |
+
+`npm run setup` asks which one you want and configures it. To do it by hand,
+set these in `wrangler.local.jsonc` → `vars` (and remove the `r2_buckets`
+entry for pure S3):
+
+| Setting | Kind | Meaning |
+| ------- | ---- | ------- |
+| `STORAGE_BACKEND` | var | `s3` to use the S3 API even if an R2 binding exists. Unset = R2 binding |
+| `S3_ENDPOINT` | var | e.g. `https://s3.eu-central-1.amazonaws.com`, `https://minio.example.com` |
+| `S3_REGION` | var | Signing region (default `auto`; AWS needs the real one) |
+| `S3_BUCKET` | var | Bucket name |
+| `S3_FORCE_PATH_STYLE` | var | `true` (default) for `endpoint/bucket/key`, `false` for `bucket.endpoint/key` |
+| `S3_ACCESS_KEY_ID` | secret | `npx wrangler secret put S3_ACCESS_KEY_ID -c wrangler.local.jsonc` |
+| `S3_SECRET_ACCESS_KEY` | secret | same |
+
+For R2 the older `R2_S3_ACCOUNT_ID`, `R2_BUCKET_NAME`, `R2_ACCESS_KEY_ID` and
+`R2_SECRET_ACCESS_KEY` names still work and are used when no `S3_*` value is set.
+
+Whatever the backend, the browser uploads big files straight to the bucket
+with presigned URLs, so the bucket needs a **CORS rule** for your gitctx
+origin (methods `GET`, `PUT`, `HEAD`; expose the `ETag` header). The setup
+script applies it for R2 and prints the JSON for other providers. For R2 the
+template is [`r2-cors.json`](r2-cors.json):
+
+```bash
+npx wrangler r2 bucket cors put gitctx --file r2-cors.json
+```
+
+Non-R2 backends buffer single-request uploads (up to `MAX_SINGLE_UPLOAD_MB`)
+inside the Worker, and the Worker needs outbound access to the endpoint.
 
 ### Archive unpacking (one extra step)
 
@@ -70,9 +85,9 @@ support runs a real 7-Zip in a Cloudflare Container, which needs:
 
 1. **Docker running** on the machine that deploys (`wrangler deploy` builds the
    image from `container/`).
-2. The R2 S3 credentials from the setup above (the container reads and writes
-   storage directly).
-3. A shared secret the container uses to call back home:
+2. The S3 credentials from the setup above (the container reads and writes
+   storage directly; it works with any S3 backend).
+3. A shared secret the container uses to call back home. `npm run setup` generates it; by hand:
 
 ```bash
 npx wrangler secret put EXTRACT_CALLBACK_SECRET   # any long random string
@@ -232,6 +247,7 @@ npm run deploy
 | `npm run dev`     | Worker locally on :8787                        |
 | `npm run dev:web` | SPA dev server on :5173 (proxies the API)      |
 | `npm run build`   | Build the SPA into `web/dist`                  |
+| `npm run setup`   | Interactive first-time setup                   |
 | `npm run deploy`  | Build + `wrangler deploy`                      |
 | `npm test`        | Worker integration tests (vitest, miniflare)   |
 | `npm run typecheck` | TypeScript for Worker and SPA                |
@@ -242,3 +258,15 @@ R2 storage is $0.015/GB-month with **zero egress fees** — a 30 GB library is
 about $0.45/month. Workers Paid ($5/month) is recommended for a team; the
 chunked/presigned design also stays within the free plan's request limits if
 you want to start there.
+
+## Testing and security
+
+`npm test` runs the whole suite inside workerd with local D1 and R2 (no cloud
+account needed); CI runs typecheck, tests and a build on every pull request,
+and [CodeQL](.github/workflows/codeql.yml) scans the code weekly and on every
+pull request. Report vulnerabilities privately, see [SECURITY.md](SECURITY.md).
+
+## Contributing and license
+
+See [CONTRIBUTING.md](CONTRIBUTING.md). gitctx is released under the
+[MIT license](LICENSE).
