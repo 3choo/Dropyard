@@ -69,6 +69,7 @@ export function NewReleasePage() {
   const [title, setTitle] = useState('');
   const [notes, setNotes] = useState('');
   const [releaseId, setReleaseId] = useState<string | null>(null);
+  const [carry, setCarry] = useState(true);
   // A release is cut from code (a branch, tag or commit) or from uploaded files.
   const [source, setSource] = useState<'code' | 'upload' | null>(search.get('ref') ? 'code' : null);
   const [ref, setRef] = useState(search.get('ref') ?? '');
@@ -80,7 +81,7 @@ export function NewReleasePage() {
     mutationFn: () =>
       api<{ release: { id: string; version: string } }>(`/api/projects/${slug}/releases`, {
         method: 'POST',
-        body: JSON.stringify({ version, title, notes, ...(fromRef ? { ref: fromRef } : {}) }),
+        body: JSON.stringify({ version, title, notes, ...(fromRef ? { ref: fromRef } : carry ? {} : { base: 'none' }) }),
       }),
     onSuccess: (res) => {
       if (fromRef) {
@@ -149,6 +150,8 @@ export function NewReleasePage() {
       {releaseId === null ? (
         <DraftForm
           codeMode={mode === 'code'}
+          carry={carry}
+          setCarry={setCarry}
           version={version}
           setVersion={setVersion}
           title={title}
@@ -171,6 +174,8 @@ export function NewReleasePage() {
 
 function DraftForm({
   codeMode,
+  carry,
+  setCarry,
   version,
   setVersion,
   title,
@@ -182,6 +187,8 @@ function DraftForm({
   error,
 }: {
   codeMode: boolean;
+  carry: boolean;
+  setCarry: (v: boolean) => void;
   version: string;
   setVersion: (v: string) => void;
   title: string;
@@ -225,6 +232,15 @@ function DraftForm({
           className="font-mono text-[12.5px]"
         />
       </div>
+      {codeMode ? null : (
+        <label className="flex cursor-pointer items-start gap-2 text-[12.5px] text-ink-2">
+          <input type="checkbox" checked={carry} onChange={(e) => setCarry(e.target.checked)} className="mt-0.5 accent-[#C9F24F]" />
+          <span>
+            Start from the latest release. Its files are shared, not copied, so you only upload what changed and
+            storage does not grow by the whole project.
+          </span>
+        </label>
+      )}
       {error ? (
         <p className="rounded-lg border border-danger/30 bg-danger-dim/60 px-3 py-2 text-[12.5px] text-danger">{error}</p>
       ) : null}
