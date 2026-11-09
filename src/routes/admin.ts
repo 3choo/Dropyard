@@ -153,3 +153,73 @@ adminRoutes.post('/storage/dedupe', async (c) => {
   }
   return c.json({ project: project.slug, dryRun, pathsChecked: paths, duplicatesMerged: merged, bytesFreed: bytes, cursor: more ? cursor : null });
 });
+
+/**
+ * Finds release files whose stored object no longer exists (for example after
+ * deleting objects straight from the bucket). Read-only by default:
+ *   POST /api/admin/storage/missing?project=<slug>&cursor=<key>
+ * Add &remove=1 to also drop those rows, so releases list only what is really
+ * stored and the files can be uploaded again. Repeat with the returned cursor.
+ */
+adminRoutes.post('/storage/missing', async (c) => {
+  const slug = c.req.query('project') ?? '';
+  const remove = c.req.query('remove') === '1';
+  const project = await c.env.DB.prepare('SELECT id, slug FROM projects WHERE slug = ?').bind(slug).first<{ id: string; slug: string }>();
+  if (!project) throw notFound('Project not found');
+  const bucket = getBucket(c.env);
+  const started = Date.now();
+  let cursor = c.req.query('cursor') ?? '';
+  let checked = 0;
+  let more = true;
+  const gone: string[] = [];
+  const byRelease = new Map<string, number>();
+
+  while (more && Date.now() - started < 20_000) {
+    const page = await c.env.DB
+      .prepare(
+        `SELECT DISTINCT f.r2_key FROM release_files f JOIN releases r ON r.id = f.release_id
+         WHERE r.project_id = ? AND f.r2_key > ? ORDER BY f.r2_key LIMIT 100`,
+      )
+      .bind(project.id, cursor)
+      .all<{ r2_key: string }>();
+    if (page.results.length === 0) {
+      more = false;
+      break;
+    }
+    for (let i = 0; i < page.results.length; i += 20) {
+      const part = page.results.slice(i, i + 20);
+      const heads = await Promise.all(part.map((r) => bucket.head(r.r2_key).catch(() => undefined)));
+      part.forEach((r, j) => {
+        cursor = r.r2_key;
+        checked++;
+        if (heads[j] === null) gone.push(r.r2_key);
+      });
+    }
+  }
+  for (const key of gone) {
+    const rows = await c.env.DB
+      .prepare('SELECT r.version FROM release_files f JOIN releases r ON r.id = f.release_id WHERE r.project_id = ? AND f.r2_key = ?')
+      .bind(project.id, key)
+      .all<{ version: string }>();
+    for (const row of rows.results) byRelease.set(row.version, (byRelease.get(row.version) ?? 0) + 1);
+  }
+  if (remove && gone.length > 0) {
+    for (let i = 0; i < gone.length; i += 40) {
+      const part = gone.slice(i, i + 40);
+      await c.env.DB
+        .prepare(`DELETE FROM release_files WHERE r2_key IN (${part.map(() => '?').join(',')}) AND release_id IN (SELECT id FROM releases WHERE project_id = ?)`)
+        .bind(...part, project.id)
+        .run();
+    }
+    await audit(c.env.DB, sessionUser(c).email, 'storage.missing.remove', `project:${project.slug}`, { objects: gone.length });
+  }
+  return c.json({
+    project: project.slug,
+    objectsChecked: checked,
+    missingObjects: gone.length,
+    removedRows: remove,
+    affectedFilesByVersion: Object.fromEntries(byRelease),
+    sample: gone.slice(0, 5),
+    cursor: more ? cursor : null,
+  });
+});
