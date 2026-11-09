@@ -215,6 +215,9 @@ adminRoutes.post('/storage/missing', async (c) => {
         .bind(...part, project.id)
         .run();
     }
+    // Cached pull manifests still list the removed files; drop them so they rebuild.
+    const rels = await c.env.DB.prepare('SELECT id FROM releases WHERE project_id = ?').bind(project.id).all<{ id: string }>();
+    await bucket.delete(rels.results.map((r) => `p/${project.id}/r/${r.id}~manifest-v1.txt`));
     await audit(c.env.DB, sessionUser(c).email, 'storage.missing.remove', `project:${project.slug}`, { objects: gone.length });
   }
   return c.json({
@@ -224,6 +227,8 @@ adminRoutes.post('/storage/missing', async (c) => {
     removedRows: remove,
     affectedFilesByVersion: Object.fromEntries(byRelease),
     sample: gone.slice(0, 5),
+    outsideCache: gone.filter((k) => !/\/cache\//i.test(k)).length,
+    outsideCacheSample: gone.filter((k) => !/\/cache\//i.test(k)).slice(0, 10),
     cursor: more ? cursor : null,
   });
 });
