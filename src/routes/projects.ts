@@ -290,6 +290,7 @@ projectRoutes.post('/:slug/releases', requireRole('admin', 'uploader'), async (c
   // A release cut from a branch, tag or commit snapshots that commit's files.
   let commitSha: string | null = null;
   let snapshot: { path: string; r2_key: string; size: number; sha: string }[] = [];
+  let skippedMissing = 0;
   if (ref) {
     const store = new GitStore(c.env, project.id);
     commitSha = await resolveCommit(store, ref);
@@ -301,6 +302,22 @@ projectRoutes.post('/:slug/releases', requireRole('admin', 'uploader'), async (c
       if (!meta?.r2_key) throw new Error(`blob ${f.sha} has no stored object`);
       return { path: f.path, r2_key: meta.r2_key, size: meta.size, sha: f.sha };
     });
+    // Skip files whose stored object no longer exists, so the release does not
+    // list files that would 404 on download.
+    const bucket = getBucket(c.env);
+    const keys = [...new Set(snapshot.map((f) => f.r2_key))];
+    const gone = new Set<string>();
+    for (let i = 0; i < keys.length; i += 64) {
+      const part = keys.slice(i, i + 64);
+      const heads = await Promise.all(part.map((k) => bucket.head(k).catch(() => undefined)));
+      part.forEach((k, j) => {
+        if (heads[j] === null) gone.add(k);
+      });
+    }
+    if (gone.size > 0) {
+      skippedMissing = snapshot.filter((f) => gone.has(f.r2_key)).length;
+      snapshot = snapshot.filter((f) => !gone.has(f.r2_key));
+    }
     if (snapshot.length === 0) throw badRequest('That commit has no files to release');
   }
 
@@ -339,7 +356,7 @@ projectRoutes.post('/:slug/releases', requireRole('admin', 'uploader'), async (c
   await touchProject(c.env.DB, project.id).run();
   await audit(c.env.DB, sessionUser(c).email, 'release.create', `project:${project.slug}/v${normalized}`, commitSha ? { commit: commitSha } : baseVersion ? { base: baseVersion, carried } : undefined);
   return c.json(
-    { release: { id, version: normalized, title: title ?? '', notes: notes ?? '', status: 'draft', commitSha }, filesAdded: snapshot.length, carriedOver: carried, baseVersion },
+    { release: { id, version: normalized, title: title ?? '', notes: notes ?? '', status: 'draft', commitSha }, filesAdded: snapshot.length, skippedMissing, carriedOver: carried, baseVersion },
     201,
   );
 });
