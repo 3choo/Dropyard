@@ -174,7 +174,7 @@ adminRoutes.post('/storage/missing', async (c) => {
   const gone: string[] = [];
   const byRelease = new Map<string, number>();
 
-  while (more && Date.now() - started < 20_000) {
+  while (more && gone.length < 300 && Date.now() - started < 12_000) {
     const page = await c.env.DB
       .prepare(
         `SELECT DISTINCT f.r2_key FROM release_files f JOIN releases r ON r.id = f.release_id
@@ -196,12 +196,16 @@ adminRoutes.post('/storage/missing', async (c) => {
       });
     }
   }
-  for (const key of gone) {
+  for (let i = 0; i < gone.length; i += 40) {
+    const part = gone.slice(i, i + 40);
     const rows = await c.env.DB
-      .prepare('SELECT r.version FROM release_files f JOIN releases r ON r.id = f.release_id WHERE r.project_id = ? AND f.r2_key = ?')
-      .bind(project.id, key)
-      .all<{ version: string }>();
-    for (const row of rows.results) byRelease.set(row.version, (byRelease.get(row.version) ?? 0) + 1);
+      .prepare(
+        `SELECT r.version, COUNT(*) AS n FROM release_files f JOIN releases r ON r.id = f.release_id
+         WHERE r.project_id = ? AND f.r2_key IN (${part.map(() => '?').join(',')}) GROUP BY r.version`,
+      )
+      .bind(project.id, ...part)
+      .all<{ version: string; n: number }>();
+    for (const row of rows.results) byRelease.set(row.version, (byRelease.get(row.version) ?? 0) + row.n);
   }
   if (remove && gone.length > 0) {
     for (let i = 0; i < gone.length; i += 40) {
