@@ -215,10 +215,12 @@ adminRoutes.post('/storage/missing', async (c) => {
         .bind(...part, project.id)
         .run();
     }
-    // Cached pull manifests still list the removed files; drop them so they rebuild.
+    await audit(c.env.DB, sessionUser(c).email, 'storage.missing.remove', `project:${project.slug}`, { objects: gone.length });
+  }
+  if (remove) {
+    // Cached pull manifests still list removed files; drop them so they rebuild.
     const rels = await c.env.DB.prepare('SELECT id FROM releases WHERE project_id = ?').bind(project.id).all<{ id: string }>();
     await bucket.delete(rels.results.map((r) => `p/${project.id}/r/${r.id}~manifest-v1.txt`));
-    await audit(c.env.DB, sessionUser(c).email, 'storage.missing.remove', `project:${project.slug}`, { objects: gone.length });
   }
   return c.json({
     project: project.slug,
