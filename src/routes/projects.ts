@@ -128,6 +128,18 @@ function touchProject(db: D1Database, projectId: string) {
   return db.prepare('UPDATE projects SET updated_at = ? WHERE id = ?').bind(nowMs(), projectId);
 }
 
+async function carryOverFiles(db: D1Database, fromReleaseId: string, toReleaseId: string, now: number): Promise<number> {
+  const res = await db
+    .prepare(
+      `INSERT INTO release_files (id, release_id, path, r2_key, size, content_type, part_digests, digest, download_count, created_at, extract_job_id)
+       SELECT lower(hex(randomblob(12))), ?, path, r2_key, size, content_type, part_digests, digest, 0, ?, NULL
+       FROM release_files WHERE release_id = ?`,
+    )
+    .bind(toReleaseId, now, fromReleaseId)
+    .run();
+  return res.meta.changes ?? 0;
+}
+
 /** Puts a web-edited file at (release, path), replacing any file already there. */
 function upsertTextFile(db: D1Database, releaseId: string, path: string, r2Key: string, size: number, digest: string, now: number) {
   return db
@@ -272,12 +284,13 @@ projectRoutes.delete('/:slug', requireRole('admin'), async (c) => {
 projectRoutes.post('/:slug/releases', requireRole('admin', 'uploader'), async (c) => {
   const project = await loadProject(c);
   const body = await c.req.json<Record<string, unknown>>().catch(() => null);
-  const { version, title, notes, ref } = (body ?? {}) as { version?: string; title?: string; notes?: string; ref?: string };
+  const { version, title, notes, ref, base } = (body ?? {}) as { version?: string; title?: string; notes?: string; ref?: string; base?: string };
   const normalized = await parseNewVersion(c.env.DB, project.id, version);
 
   // A release cut from a branch, tag or commit snapshots that commit's files.
   let commitSha: string | null = null;
   let snapshot: { path: string; r2_key: string; size: number; sha: string }[] = [];
+  let skippedMissing = 0;
   if (ref) {
     const store = new GitStore(c.env, project.id);
     commitSha = await resolveCommit(store, ref);
@@ -289,6 +302,22 @@ projectRoutes.post('/:slug/releases', requireRole('admin', 'uploader'), async (c
       if (!meta?.r2_key) throw new Error(`blob ${f.sha} has no stored object`);
       return { path: f.path, r2_key: meta.r2_key, size: meta.size, sha: f.sha };
     });
+    // Skip files whose stored object no longer exists, so the release does not
+    // list files that would 404 on download.
+    const bucket = getBucket(c.env);
+    const keys = [...new Set(snapshot.map((f) => f.r2_key))];
+    const gone = new Set<string>();
+    for (let i = 0; i < keys.length; i += 64) {
+      const part = keys.slice(i, i + 64);
+      const heads = await Promise.all(part.map((k) => bucket.head(k).catch(() => undefined)));
+      part.forEach((k, j) => {
+        if (heads[j] === null) gone.add(k);
+      });
+    }
+    if (gone.size > 0) {
+      skippedMissing = snapshot.filter((f) => gone.has(f.r2_key)).length;
+      snapshot = snapshot.filter((f) => !gone.has(f.r2_key));
+    }
     if (snapshot.length === 0) throw badRequest('That commit has no files to release');
   }
 
@@ -309,10 +338,25 @@ projectRoutes.post('/:slug/releases', requireRole('admin', 'uploader'), async (c
       ),
     );
   }
+  let carried = 0;
+  let baseVersion: string | null = null;
+  if (!ref && base !== 'none') {
+    const from = base && base !== 'latest'
+      ? await getRelease(c.env.DB, project.id, normalizeVersion(base))
+      : await c.env.DB
+          .prepare("SELECT * FROM releases WHERE project_id = ? AND status = 'published' ORDER BY is_latest DESC, published_at DESC LIMIT 1")
+          .bind(project.id)
+          .first<ReleaseRow>();
+    if (base && base !== 'latest' && !from) throw notFound(`Base release ${base} not found`);
+    if (from) {
+      carried = await carryOverFiles(c.env.DB, from.id, id, now);
+      baseVersion = from.version;
+    }
+  }
   await touchProject(c.env.DB, project.id).run();
-  await audit(c.env.DB, sessionUser(c).email, 'release.create', `project:${project.slug}/v${normalized}`, commitSha ? { commit: commitSha } : undefined);
+  await audit(c.env.DB, sessionUser(c).email, 'release.create', `project:${project.slug}/v${normalized}`, commitSha ? { commit: commitSha } : baseVersion ? { base: baseVersion, carried } : undefined);
   return c.json(
-    { release: { id, version: normalized, title: title ?? '', notes: notes ?? '', status: 'draft', commitSha }, filesAdded: snapshot.length },
+    { release: { id, version: normalized, title: title ?? '', notes: notes ?? '', status: 'draft', commitSha }, filesAdded: snapshot.length, skippedMissing, carriedOver: carried, baseVersion },
     201,
   );
 });
@@ -462,14 +506,7 @@ projectRoutes.post('/:slug/releases/:version/fork', requireRole('admin', 'upload
     .prepare('INSERT INTO releases (id, project_id, version, title, notes, status, created_by, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)')
     .bind(id, project.id, normalized, (title ?? '').slice(0, 200), (notes ?? '').slice(0, 20000), 'draft', sessionUser(c).id, now)
     .run();
-  const clone = await c.env.DB
-    .prepare(
-      `INSERT INTO release_files (id, release_id, path, r2_key, size, content_type, part_digests, digest, download_count, created_at, extract_job_id)
-       SELECT lower(hex(randomblob(12))), ?, path, r2_key, size, content_type, part_digests, digest, 0, ?, NULL
-       FROM release_files WHERE release_id = ?`,
-    )
-    .bind(id, now, release.id)
-    .run();
+  const cloned = await carryOverFiles(c.env.DB, release.id, id, now);
   if (editPath && editBytes) {
     const r2Key = await writeKeyFor(c.env.DB, project.id, id, editPath);
     await getBucket(c.env).put(r2Key, editBytes, { httpMetadata: { contentType: contentTypeForPath(editPath) } });
@@ -480,9 +517,9 @@ projectRoutes.post('/:slug/releases/:version/fork', requireRole('admin', 'upload
   await audit(c.env.DB, sessionUser(c).email, 'release.fork', `project:${project.slug}/v${normalized}`, {
     from: release.version,
     edited: editPath,
-    filesCloned: clone.meta.changes ?? 0,
+    filesCloned: cloned,
   });
-  return c.json({ release: { id, version: normalized, status: 'draft' }, filesCloned: clone.meta.changes ?? 0 }, 201);
+  return c.json({ release: { id, version: normalized, status: 'draft' }, filesCloned: cloned }, 201);
 });
 
 projectRoutes.put('/:slug/releases/:version/files/content', requireRole('admin', 'uploader'), async (c) => {

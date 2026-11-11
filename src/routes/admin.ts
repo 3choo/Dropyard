@@ -4,6 +4,8 @@ import type { Role } from '../lib/auth';
 import { badRequest, conflict, notFound } from '../lib/http';
 import { nowMs, randomToken } from '../lib/ids';
 import { requireRole, sessionUser, type AppEnv } from '../middleware';
+import { deleteUnreferencedObjects } from '../lib/r2refs';
+import { getBucket } from '../lib/storage';
 
 const ROLES: Role[] = ['admin', 'uploader', 'viewer'];
 
@@ -80,4 +82,155 @@ adminRoutes.get('/audit', async (c) => {
     .bind(before, limit)
     .all();
   return c.json({ entries: rows.results });
+});
+
+adminRoutes.post('/storage/dedupe', async (c) => {
+  const slug = c.req.query('project') ?? '';
+  const dryRun = c.req.query('dryRun') === '1' || c.req.query('dryRun') === 'true';
+  const project = await c.env.DB.prepare('SELECT id, slug FROM projects WHERE slug = ?').bind(slug).first<{ id: string; slug: string }>();
+  if (!project) throw notFound('Project not found');
+  const bucket = getBucket(c.env);
+  const started = Date.now();
+  let cursor = c.req.query('cursor') ?? '';
+  let more = true;
+  let paths = 0;
+  let merged = 0;
+  let bytes = 0;
+  const spare: string[] = [];
+
+  while (more && Date.now() - started < 20_000) {
+    const page = await c.env.DB
+      .prepare(
+        `SELECT DISTINCT f.path FROM release_files f JOIN releases r ON r.id = f.release_id
+         WHERE r.project_id = ? AND f.path > ? ORDER BY f.path LIMIT 40`,
+      )
+      .bind(project.id, cursor)
+      .all<{ path: string }>();
+    if (page.results.length === 0) {
+      more = false;
+      break;
+    }
+    for (const { path } of page.results) {
+      cursor = path;
+      paths++;
+      const rows = await c.env.DB
+        .prepare(
+          `SELECT f.r2_key, f.size, f.digest, MIN(r.created_at) AS first_seen
+           FROM release_files f JOIN releases r ON r.id = f.release_id
+           WHERE r.project_id = ? AND f.path = ? GROUP BY f.r2_key, f.size, f.digest ORDER BY first_seen`,
+        )
+        .bind(project.id, path)
+        .all<{ r2_key: string; size: number; digest: string | null }>();
+      if (rows.results.length < 2) continue;
+      const keepers: Array<{ key: string; size: number; digest: string | null; etag: string }> = [];
+      for (const row of rows.results) {
+        const head = await bucket.head(row.r2_key);
+        if (!head || !head.httpEtag || head.size !== row.size) continue;
+        const twin = keepers.find(
+          (k) => k.size === row.size && k.etag === head.httpEtag && (k.digest === null || row.digest === null || k.digest === row.digest),
+        );
+        if (!twin) {
+          keepers.push({ key: row.r2_key, size: row.size, digest: row.digest, etag: head.httpEtag });
+          continue;
+        }
+        if (twin.key === row.r2_key) continue;
+        merged++;
+        bytes += row.size;
+        if (dryRun) continue;
+        await c.env.DB.batch([
+          c.env.DB
+            .prepare('UPDATE release_files SET r2_key = ? WHERE r2_key = ? AND release_id IN (SELECT id FROM releases WHERE project_id = ?)')
+            .bind(twin.key, row.r2_key, project.id),
+          c.env.DB.prepare('UPDATE git_objects SET r2_key = ? WHERE project_id = ? AND r2_key = ?').bind(twin.key, project.id, row.r2_key),
+        ]);
+        spare.push(row.r2_key);
+      }
+    }
+  }
+  if (!dryRun) await deleteUnreferencedObjects(c.env.DB, bucket, spare);
+  if (!dryRun && merged > 0) {
+    await audit(c.env.DB, sessionUser(c).email, 'storage.dedupe', `project:${project.slug}`, { merged, bytesFreed: bytes });
+  }
+  return c.json({ project: project.slug, dryRun, pathsChecked: paths, duplicatesMerged: merged, bytesFreed: bytes, cursor: more ? cursor : null });
+});
+
+/**
+ * Finds release files whose stored object no longer exists (for example after
+ * deleting objects straight from the bucket). Read-only by default:
+ *   POST /api/admin/storage/missing?project=<slug>&cursor=<key>
+ * Add &remove=1 to also drop those rows, so releases list only what is really
+ * stored and the files can be uploaded again. Repeat with the returned cursor.
+ */
+adminRoutes.post('/storage/missing', async (c) => {
+  const slug = c.req.query('project') ?? '';
+  const remove = c.req.query('remove') === '1';
+  const project = await c.env.DB.prepare('SELECT id, slug FROM projects WHERE slug = ?').bind(slug).first<{ id: string; slug: string }>();
+  if (!project) throw notFound('Project not found');
+  const bucket = getBucket(c.env);
+  const started = Date.now();
+  let cursor = c.req.query('cursor') ?? '';
+  let checked = 0;
+  let more = true;
+  const gone: string[] = [];
+  const byRelease = new Map<string, number>();
+
+  while (more && gone.length < 300 && Date.now() - started < 12_000) {
+    const page = await c.env.DB
+      .prepare(
+        `SELECT DISTINCT f.r2_key FROM release_files f JOIN releases r ON r.id = f.release_id
+         WHERE r.project_id = ? AND f.r2_key > ? ORDER BY f.r2_key LIMIT 100`,
+      )
+      .bind(project.id, cursor)
+      .all<{ r2_key: string }>();
+    if (page.results.length === 0) {
+      more = false;
+      break;
+    }
+    for (let i = 0; i < page.results.length; i += 20) {
+      const part = page.results.slice(i, i + 20);
+      const heads = await Promise.all(part.map((r) => bucket.head(r.r2_key).catch(() => undefined)));
+      part.forEach((r, j) => {
+        cursor = r.r2_key;
+        checked++;
+        if (heads[j] === null) gone.push(r.r2_key);
+      });
+    }
+  }
+  for (let i = 0; i < gone.length; i += 40) {
+    const part = gone.slice(i, i + 40);
+    const rows = await c.env.DB
+      .prepare(
+        `SELECT r.version, COUNT(*) AS n FROM release_files f JOIN releases r ON r.id = f.release_id
+         WHERE r.project_id = ? AND f.r2_key IN (${part.map(() => '?').join(',')}) GROUP BY r.version`,
+      )
+      .bind(project.id, ...part)
+      .all<{ version: string; n: number }>();
+    for (const row of rows.results) byRelease.set(row.version, (byRelease.get(row.version) ?? 0) + row.n);
+  }
+  if (remove && gone.length > 0) {
+    for (let i = 0; i < gone.length; i += 40) {
+      const part = gone.slice(i, i + 40);
+      await c.env.DB
+        .prepare(`DELETE FROM release_files WHERE r2_key IN (${part.map(() => '?').join(',')}) AND release_id IN (SELECT id FROM releases WHERE project_id = ?)`)
+        .bind(...part, project.id)
+        .run();
+    }
+    await audit(c.env.DB, sessionUser(c).email, 'storage.missing.remove', `project:${project.slug}`, { objects: gone.length });
+  }
+  if (remove) {
+    // Cached pull manifests still list removed files; drop them so they rebuild.
+    const rels = await c.env.DB.prepare('SELECT id FROM releases WHERE project_id = ?').bind(project.id).all<{ id: string }>();
+    await bucket.delete(rels.results.map((r) => `p/${project.id}/r/${r.id}~manifest-v1.txt`));
+  }
+  return c.json({
+    project: project.slug,
+    objectsChecked: checked,
+    missingObjects: gone.length,
+    removedRows: remove,
+    affectedFilesByVersion: Object.fromEntries(byRelease),
+    sample: gone.slice(0, 5),
+    outsideCache: gone.filter((k) => !/\/cache\//i.test(k)).length,
+    outsideCacheSample: gone.filter((k) => !/\/cache\//i.test(k)).slice(0, 10),
+    cursor: more ? cursor : null,
+  });
 });
