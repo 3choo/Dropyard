@@ -33,11 +33,11 @@
     "@codemirror/view": "^6.43.15",
     "aws4fetch": "^1.0.20",
     "fflate": "^0.8.3",
-    "hono": "^4.13.14",
+    "hono": "^4.13.17",
     "shiki": "^4.5.0"
   },
   "devDependencies": {
-    "@cloudflare/vitest-plugin": "^1.4.12",
+    "@cloudflare/vitest-plugin": "^1.6.0",
     "@fontsource-variable/geist": "^5.3.0",
     "@fontsource-variable/jetbrains-mono": "^5.3.0",
     "@tailwindcss/vite": "^4.3.5",
